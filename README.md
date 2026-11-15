@@ -177,3 +177,57 @@ Prueba manual del módulo de pedidos:
 - Registrar un pedido no descuenta stock.
 - Los usuarios creados desde `/register` viven en la memoria del navegador y
   se pierden al recargar la página.
+
+
+# 🌮 Don Bigotes - Sistema Móvil de Gestión de Restaurante
+
+Aplicación móvil multiplataforma desarrollada en **React Native (Expo)** y **Firebase** para la gestión integral de comandas, catálogo de platillos y analítica de ventas en tiempo real con control de acceso basado en roles.
+
+---
+
+## 🚀 Características Principales
+
+El sistema adapta automáticamente su interfaz y permisos según el rol autenticado del usuario:
+
+* **👑 Administrador (`admin`):**
+  * Control total CRUD sobre el catálogo de platillos (precios, creación, edición, eliminación y disponibilidad).
+  * Gestión de cuentas de personal y clientes (`Nuevo usuario`).
+  * Supervisión y cambio de estado de todas las comandas activas.
+  * **Módulo Analítico Exclusivo:** Consulta de ingresos y volumen de órdenes por período (**Hoy** vs. **Últimos 7 días**) y ranking visual de los platillos más vendidos para la toma de decisiones.
+* **📋 Encargado (`encargado`):**
+  * Monitoreo de métricas operativas del día (pedidos de hoy, platillos disponibles y ventas acumuladas de la jornada).
+  * Control de disponibilidad del menú en tiempo real y actualización de estados de pedidos (`Pendiente` → `En preparación` → `Entregado`).
+* **🍽️ Cliente (`cliente`):**
+  * Interfaz limpia enfocada en el catálogo disponible con selectores interactivos de cantidad (`+` / `-`).
+  * Envío directo de órdenes a cocina sin requerir asignación de mesa física.
+  * Pestaña **Ver Mi Pedido y Estado** para dar seguimiento en tiempo real a sus propias órdenes.
+
+---
+
+## 🛠️ Stack Tecnológico
+
+* **Frontend Móvil:** React Native, Expo, TypeScript
+* **Navegación:** React Navigation (`@react-navigation/native-stack`)
+* **Backend & Base de Datos:** Firebase Authentication y Cloud Firestore (sincronización en tiempo real mediante `onSnapshot`)
+
+---
+
+## 📁 Estructura del Proyecto
+
+```text
+DonBigotesApp2/
+├── docs/                       # Documentación y entregables del proyecto
+├── DonBigotesMobile/           # Código fuente de la aplicación móvil
+│   ├── assets/                 # Íconos y recursos gráficos
+│   ├── src/
+│   │   ├── screens/
+│   │   │   ├── LoginScreen.tsx     # Inicio de sesión y validación de roles
+│   │   │   ├── RegisterScreen.tsx  # Registro de clientes y creación de usuarios por Admin
+│   │   │   ├── HomeScreen.tsx      # Dashboard operativo, catálogo cliente y analítica Admin
+│   │   │   ├── MenuScreen.tsx      # Administración del catálogo de platillos
+│   │   │   └── OrdersScreen.tsx    # Control de comandas y estados en cocina
+│   │   └── services/
+│   │       └── firebaseConfig.ts   # Configuración e inicialización de Firebase
+│   ├── App.tsx                 # Enrutador principal de pantallas
+│   └── package.json            # Dependencias de Expo / React Native
+└── README.md
