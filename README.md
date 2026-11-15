@@ -1,4 +1,4 @@
-# DonBigotesApp — Web (Etapa 2)
+# DonBigotesApp — Web y Etapa Movil
 
 Panel web administrativo para el Comedor "Don Bigotes" (Colonia Las Brisas,
 Soyapango). Proyecto de capstone — Etapa 2: aplicación Next.js con
