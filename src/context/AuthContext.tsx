@@ -4,67 +4,160 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
-  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
-import type { AuthContextValue, AuthResult, PublicUser, Role, User } from "@/types/auth";
-import { mockUsers } from "@/lib/mockUsers";
 import {
-  clearSession,
-  emailExists,
-  findUserByCredentials,
-  persistSession,
-  readSession,
-  toPublicUser,
-} from "@/lib/auth";
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  createUserWithEmailAndPassword,
+  signOut,
+  type User as FirebaseUser,
+} from "firebase/auth";
+import {
+  doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
+} from "firebase/firestore";
+import { auth, db, googleProvider } from "@/lib/firebase";
+import type { AuthContextValue, AuthResult, PublicUser, Role } from "@/types/auth";
 
+const SESSION_COOKIE = "donbigotes_session";
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-// Copia mutable en memoria del "mock backend": vive mientras el servidor de
-// desarrollo esté corriendo y se reinicia en cada recarga del server. Se
-// reemplazará por la API REST real (ver TODOs en lib/auth.ts).
-let usersDb: User[] = [...mockUsers];
-let nextId = usersDb.length + 1;
+function syncSessionCookie(uid: string | null) {
+  if (typeof document === "undefined") return;
+  if (uid) {
+    document.cookie = `${SESSION_COOKIE}=${encodeURIComponent(uid)}; path=/; max-age=${60 * 60 * 24 * 7}`;
+  } else {
+    document.cookie = `${SESSION_COOKIE}=; path=/; max-age=0`;
+  }
+}
 
-// El servidor nunca tiene localStorage, así que su "snapshot" siempre es
-// `false` (aún cargando); el cliente reporta `true` en cuanto se hidrata.
-// Con useSyncExternalStore evitamos el patrón de poner un flag en un efecto
-// de montaje, que dispara un setState innecesario y un render extra.
-function subscribeNoop() {
-  return () => {};
+function normalizeRole(rawRole: unknown): Role {
+  if (rawRole === "admin" || rawRole === "encargado" || rawRole === "cliente") {
+    return rawRole;
+  }
+  return "cliente";
 }
-function getHasMountedClientSnapshot() {
-  return true;
+
+async function resolvePublicUser(fbUser: FirebaseUser): Promise<PublicUser> {
+  const userRef = doc(db, "users", fbUser.uid);
+  const snap = await getDoc(userRef);
+
+  if (snap.exists()) {
+    const data = snap.data();
+    return {
+      id: fbUser.uid,
+      nombre:
+        typeof data.nombre === "string" && data.nombre.trim().length > 0
+          ? data.nombre
+          : fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Usuario",
+      email: typeof data.email === "string" ? data.email : fbUser.email ?? "",
+      role: normalizeRole(data.role),
+    };
+  }
+
+  const fallbackNombre =
+    fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Usuario Don Bigotes";
+  const fallbackEmail = fbUser.email ?? "";
+  const defaultRole: Role = "cliente";
+
+  await setDoc(userRef, {
+    uid: fbUser.uid,
+    nombre: fallbackNombre,
+    email: fallbackEmail,
+    role: defaultRole,
+    createdAt: serverTimestamp(),
+  });
+
+  return {
+    id: fbUser.uid,
+    nombre: fallbackNombre,
+    email: fallbackEmail,
+    role: defaultRole,
+  };
 }
-function getHasMountedServerSnapshot() {
-  return false;
+
+function mapAuthError(err: unknown): string {
+  const code =
+    typeof err === "object" && err !== null && "code" in err
+      ? String((err as { code?: unknown }).code)
+      : "";
+
+  switch (code) {
+    case "auth/invalid-credential":
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+      return "Correo o contraseña incorrectos.";
+    case "auth/email-already-in-use":
+      return "Ya existe una cuenta con ese correo.";
+    case "auth/weak-password":
+      return "La contraseña debe tener al menos 6 caracteres.";
+    case "auth/popup-closed-by-user":
+      return "Se cerró la ventana de inicio de sesión de Google antes de completar el acceso.";
+    case "auth/unauthorized-domain":
+      return "Este dominio no está autorizado en Firebase Authentication.";
+    default:
+      return "No se pudo completar la autenticación. Intenta nuevamente.";
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // Lectura perezosa de localStorage: corre durante el render (no en un
-  // efecto) para no disparar un setState en cascada.
-  const [user, setUser] = useState<PublicUser | null>(() => readSession());
-  const hasMounted = useSyncExternalStore(
-    subscribeNoop,
-    getHasMountedClientSnapshot,
-    getHasMountedServerSnapshot
-  );
-  const isLoading = !hasMounted;
+  const [user, setUser] = useState<PublicUser | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
   const router = useRouter();
 
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      try {
+        if (!fbUser) {
+          syncSessionCookie(null);
+          setUser(null);
+          setIsLoading(false);
+          return;
+        }
+        const profile = await resolvePublicUser(fbUser);
+        syncSessionCookie(profile.id);
+        setUser(profile);
+      } catch {
+        syncSessionCookie(null);
+        setUser(null);
+      } finally {
+        setIsLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   const login = useCallback(async (email: string, password: string): Promise<AuthResult> => {
-    // TODO: reemplazar por POST /api/auth/login cuando el backend esté listo.
-    const found = findUserByCredentials(usersDb, email, password);
-    if (!found) {
-      return { success: false, error: "Correo o contraseña incorrectos." };
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const profile = await resolvePublicUser(cred.user);
+      syncSessionCookie(profile.id);
+      setUser(profile);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: mapAuthError(err) };
     }
-    const publicUser = toPublicUser(found);
-    persistSession(publicUser);
-    setUser(publicUser);
-    return { success: true };
+  }, []);
+
+  const loginWithGoogle = useCallback(async (): Promise<AuthResult> => {
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const profile = await resolvePublicUser(cred.user);
+      syncSessionCookie(profile.id);
+      setUser(profile);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: mapAuthError(err) };
+    }
   }, []);
 
   const register = useCallback(
@@ -74,22 +167,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       password: string,
       role: Role
     ): Promise<AuthResult> => {
-      // TODO: reemplazar por POST /api/auth/register cuando el backend esté listo.
-      // Nota: esta acción la ejecuta un admin ya autenticado para crear la
-      // cuenta de otro miembro del equipo, así que NO debe iniciar sesión
-      // como el usuario recién creado ni tocar la sesión actual.
-      if (emailExists(usersDb, email)) {
-        return { success: false, error: "Ya existe una cuenta con ese correo." };
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        const cleanName = nombre.trim();
+        const cleanEmail = email.trim().toLowerCase();
+
+        await setDoc(doc(db, "users", cred.user.uid), {
+          uid: cred.user.uid,
+          nombre: cleanName,
+          email: cleanEmail,
+          role,
+          createdAt: serverTimestamp(),
+        });
+
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: mapAuthError(err) };
       }
-      const newUser: User = { id: String(nextId++), nombre, email, password, role };
-      usersDb = [...usersDb, newUser];
-      return { success: true };
     },
     []
   );
 
-  const logout = useCallback(() => {
-    clearSession();
+  const logout = useCallback(async () => {
+    await signOut(auth);
+    syncSessionCookie(null);
     setUser(null);
     router.push("/login");
   }, [router]);
@@ -100,10 +201,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role: user?.role ?? null,
       isLoading,
       login,
+      loginWithGoogle,
       register,
       logout,
     }),
-    [user, isLoading, login, register, logout]
+    [user, isLoading, login, loginWithGoogle, register, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

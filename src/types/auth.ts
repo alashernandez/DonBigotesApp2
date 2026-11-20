@@ -1,10 +1,10 @@
-export type Role = "admin" | "encargado";
+export type Role = "admin" | "encargado" | "cliente";
 
 export interface User {
   id: string;
   nombre: string;
   email: string;
-  password: string;
+  password?: string;
   role: Role;
 }
 
@@ -20,11 +20,12 @@ export interface AuthContextValue {
   role: Role | null;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<AuthResult>;
+  loginWithGoogle: () => Promise<AuthResult>;
   register: (
     nombre: string,
     email: string,
     password: string,
     role: Role
   ) => Promise<AuthResult>;
-  logout: () => void;
+  logout: () => Promise<void> | void;
 }
