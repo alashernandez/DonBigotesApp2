@@ -1,25 +1,29 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import axios from 'axios';
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Navbar from "@/components/Navbar";
 import { Dish } from '@/types/dish';
+import {
+  createDish,
+  deleteDish,
+  fetchDishes,
+  updateDishAvailability,
+} from '@/services/dishesService';
 
 export default function MenuPage() {
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Formulario para nuevo platillo
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [price, setPrice] = useState('');
   const [category, setCategory] = useState('almuerzo');
 
-  const fetchDishes = async () => {
+  const loadDishes = async () => {
     try {
-      const response = await axios.get('/api/dishes');
-      setDishes(response.data);
+      const data = await fetchDishes();
+      setDishes(data);
     } catch (error) {
       console.error('Error al obtener platillos:', error);
     } finally {
@@ -28,16 +32,13 @@ export default function MenuPage() {
   };
 
   useEffect(() => {
-    const loadDishes = async () => {
-      await fetchDishes();
-    };
     loadDishes();
   }, []);
 
   const toggleAvailability = async (id: string, currentStatus: boolean) => {
     try {
-      await axios.put('/api/dishes', { id, available: !currentStatus });
-      fetchDishes();
+      await updateDishAvailability(id, !currentStatus);
+      await loadDishes();
     } catch (error) {
       console.error('Error al actualizar disponibilidad:', error);
     }
@@ -48,11 +49,11 @@ export default function MenuPage() {
     if (!name || !price) return;
 
     try {
-      await axios.post('/api/dishes', { name, description, price, category });
+      await createDish({ name, description, price, category });
       setName('');
       setDescription('');
       setPrice('');
-      fetchDishes();
+      await loadDishes();
     } catch (error) {
       console.error('Error al crear platillo:', error);
     }
@@ -60,8 +61,8 @@ export default function MenuPage() {
 
   const handleDeleteDish = async (id: string) => {
     try {
-      await axios.delete(`/api/dishes?id=${id}`);
-      fetchDishes();
+      await deleteDish(id);
+      await loadDishes();
     } catch (error) {
       console.error('Error al eliminar platillo:', error);
     }
@@ -74,7 +75,6 @@ export default function MenuPage() {
         <h1 className="text-3xl font-bold text-gray-800 mb-2">Gestión de Menú - Don Bigotes</h1>
         <p className="text-gray-600 mb-6">Control Completo de Platillos y Disponibilidad</p>
 
-        {/* Formulario Crear Platillo */}
         <form onSubmit={handleCreateDish} className="bg-white p-5 rounded-lg shadow border border-gray-200 mb-8">
           <h2 className="text-lg font-bold text-gray-800 mb-3">Agregar Nuevo Platillo</h2>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
