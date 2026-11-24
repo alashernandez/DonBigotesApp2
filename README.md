@@ -252,3 +252,8 @@ A continuación se presentan las maquetas base de **Don Bigotes**, que definiero
 ### Vista Web — Pedidos
 ![Mockup Web Pedidos](./docs/maquetas/web-menu-pedidos.png)
 *Diseño de referencia para el seguimiento y operación de pedidos en el panel web.*
+
+
+## Licencia
+
+Este proyecto se encuentra bajo una licencia **Creative Commons Reconocimiento-NoComercial 4.0 Internacional (CC BY-NC 4.0)**. Revisa los detalles en el archivo [LICENSE.md](./LICENSE.md).
