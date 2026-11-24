@@ -1,313 +1,556 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
   TouchableOpacity,
-  StyleSheet,
   ScrollView,
+  StyleSheet,
   ActivityIndicator,
-  Platform,
   Alert,
+  Platform,
 } from 'react-native';
 import {
   collection,
   onSnapshot,
   addDoc,
+  updateDoc,
   deleteDoc,
   doc,
-  updateDoc,
+  serverTimestamp,
 } from 'firebase/firestore';
-import { db, auth } from '../services/firebaseConfig';
+import { signOut } from 'firebase/auth';
+import { auth, db } from '../services/firebaseConfig';
 
-interface Product {
+const CATEGORIES = ['Almuerzo', 'Mexicana', 'Bebida', 'Postre'] as const;
+type CategoryType = (typeof CATEGORIES)[number];
+
+interface Dish {
   id: string;
   nombre: string;
   precio: number;
-  disponible?: boolean;
+  categoria: string;
+  descripcion?: string;
+  disponible: boolean;
 }
 
 export default function MenuScreen({ navigation }: any) {
-  const [userRole, setUserRole] = useState<'admin' | 'encargado' | 'cliente'>('cliente');
-  const [products, setProducts] = useState<Product[]>([]);
+  const [dishes, setDishes] = useState<Dish[]>([]);
   const [loading, setLoading] = useState(true);
-
-  // Campos para crear platillo (Solo Admin)
-  const [newNombre, setNewNombre] = useState('');
-  const [newPrecio, setNewPrecio] = useState('');
   const [saving, setSaving] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  const showNotification = (title: string, message: string) => {
+  const [nombre, setNombre] = useState('');
+  const [precio, setPrecio] = useState('');
+  const [categoria, setCategoria] = useState<CategoryType>('Almuerzo');
+  const [descripcion, setDescripcion] = useState('');
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+
+  const notify = (title: string, msg: string) => {
     if (Platform.OS === 'web') {
-      window.alert(`${title}: ${message}`);
+      window.alert(`${title}: ${msg}`);
     } else {
-      Alert.alert(title, message);
+      Alert.alert(title, msg);
     }
   };
 
-  // 1. Obtener rol del usuario actual
   useEffect(() => {
     const currentUser = auth.currentUser;
-    if (!currentUser) return;
+    if (!currentUser) {
+      setIsAdmin(false);
+      return;
+    }
 
-    const unsubUser = onSnapshot(collection(db, 'users'), (snapshot) => {
-      const userDoc = snapshot.docs.find(
+    const unsubUser = onSnapshot(collection(db, 'users'), (snap) => {
+      const found = snap.docs.find(
         (d) => d.id === currentUser.uid || d.data().uid === currentUser.uid
       );
-      if (userDoc) {
-        setUserRole(userDoc.data().role || 'cliente');
-      }
+      const roleVal = String(found?.data()?.role || '').toLowerCase();
+      setIsAdmin(roleVal === 'admin');
     });
 
     return () => unsubUser();
   }, []);
 
-  // 2. Cargar productos/platillos en tiempo real
   useEffect(() => {
-    const unsubProducts = onSnapshot(collection(db, 'productos'), (snapshot) => {
-      const list: Product[] = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        nombre: docSnap.data().nombre || 'Sin nombre',
-        precio: Number(docSnap.data().precio || 0),
-        disponible: docSnap.data().disponible ?? true,
-      }));
-      setProducts(list);
-      setLoading(false);
-    });
+    const unsub = onSnapshot(
+      collection(db, 'productos'),
+      (snapshot) => {
+        const list: Dish[] = snapshot.docs.map((snap) => {
+          const data = snap.data();
+          const isAvailable =
+            typeof data.disponible === 'boolean'
+              ? data.disponible
+              : typeof data.available === 'boolean'
+              ? data.available
+              : true;
 
-    return () => unsubProducts();
+          return {
+            id: snap.id,
+            nombre: data.nombre || data.name || 'Sin nombre',
+            precio: Number(data.precio ?? data.price ?? 0),
+            categoria: String(data.categoria || data.category || 'Almuerzo'),
+            descripcion: data.descripcion || data.description || '',
+            disponible: isAvailable,
+          };
+        });
+
+        setDishes(list);
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Error al escuchar productos en Firestore:', error);
+        setLoading(false);
+      }
+    );
+
+    return () => unsub();
   }, []);
 
-  // Crear platillo (Solo Admin)
-  const handleCreateProduct = async () => {
-    if (!newNombre.trim() || !newPrecio.trim()) {
-      showNotification('Campos incompletos', 'Ingresa el nombre y precio del platillo.');
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      navigation.replace('Login');
+    } catch (error) {
+      console.error('Error al cerrar sesión:', error);
+      notify('Error', 'No se pudo cerrar sesión.');
+    }
+  };
+
+  const handleAddDish = async () => {
+    const cleanName = nombre.trim();
+    const numericPrice = parseFloat(precio.replace(',', '.'));
+
+    if (!cleanName) {
+      notify('Campo requerido', 'Ingresa el nombre del platillo.');
+      return;
+    }
+    if (Number.isNaN(numericPrice) || numericPrice <= 0) {
+      notify('Precio inválido', 'Ingresa un precio válido mayor a 0.');
       return;
     }
 
     try {
       setSaving(true);
+      const cleanDesc = descripcion.trim();
+      const lowerCat = categoria.toLowerCase();
+
       await addDoc(collection(db, 'productos'), {
-        nombre: newNombre.trim(),
-        precio: Number(newPrecio),
+        nombre: cleanName,
+        name: cleanName,
+        precio: numericPrice,
+        price: numericPrice,
+        categoria,
+        category: lowerCat,
+        descripcion: cleanDesc,
+        description: cleanDesc,
         disponible: true,
+        available: true,
+        createdAt: serverTimestamp(),
       });
-      setNewNombre('');
-      setNewPrecio('');
+
+      setNombre('');
+      setPrecio('');
+      setDescripcion('');
+      setDropdownOpen(false);
     } catch (error) {
-      console.error('Error al crear platillo:', error);
-      showNotification('Error', 'No se pudo registrar el platillo.');
+      console.error('Error al agregar platillo:', error);
+      notify('Error', 'No se pudo agregar el platillo.');
     } finally {
       setSaving(false);
     }
   };
 
-  // Eliminar platillo (Solo Admin)
-  const handleDeleteProduct = async (id: string) => {
+  const handleToggleAvailability = async (dish: Dish) => {
+    const nextAvailable = !dish.disponible;
     try {
-      await deleteDoc(doc(db, 'productos', id));
-    } catch (error) {
-      console.error('Error al eliminar platillo:', error);
-      showNotification('Error', 'No se pudo eliminar el platillo.');
-    }
-  };
-
-  // Cambiar disponibilidad (Admin y Encargado)
-  const handleToggleAvailability = async (id: string, currentStatus: boolean) => {
-    try {
-      await updateDoc(doc(db, 'productos', id), {
-        disponible: !currentStatus,
+      await updateDoc(doc(db, 'productos', dish.id), {
+        disponible: nextAvailable,
+        available: nextAvailable,
       });
     } catch (error) {
       console.error('Error al cambiar disponibilidad:', error);
+      notify('Error', 'No se pudo actualizar la disponibilidad.');
     }
   };
 
+  const handleDeleteDish = async (dish: Dish) => {
+    const performDelete = async () => {
+      try {
+        await deleteDoc(doc(db, 'productos', dish.id));
+      } catch (error) {
+        console.error('Error al eliminar platillo:', error);
+        notify('Error', 'No se pudo eliminar el platillo.');
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      if (window.confirm(`¿Eliminar "${dish.nombre}" del menú?`)) {
+        await performDelete();
+      }
+      return;
+    }
+
+    Alert.alert(
+      'Eliminar platillo',
+      `¿Seguro que deseas eliminar "${dish.nombre}"?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Eliminar', style: 'destructive', onPress: performDelete },
+      ]
+    );
+  };
+
   return (
-    <ScrollView style={styles.container}>
-      {/* Barra de Navegación Superior */}
-      <View style={styles.navbar}>
-        <Text style={styles.navBrand}>Don Bigotes</Text>
-        <View style={styles.navActions}>
-          <TouchableOpacity
-            style={styles.navTab}
-            onPress={() => navigation.navigate('Home')}
-          >
-            <Text style={styles.navTabText}>Dashboard</Text>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.topNav}>
+        <View style={styles.topNavHeader}>
+          <Text style={styles.navBrand}>Don Bigotes</Text>
+          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+            <Text style={styles.logoutBtnText}>Salir</Text>
           </TouchableOpacity>
+        </View>
 
-          <TouchableOpacity style={styles.navTabActive}>
-            <Text style={styles.navTabTextActive}>Menú</Text>
+        <View style={styles.navLinks}>
+          <TouchableOpacity onPress={() => navigation.navigate('Home')}>
+            <Text style={styles.navLinkYellow}>Dashboard</Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.navTab}
-            onPress={() => navigation.navigate('Orders')}
-          >
-            <Text style={styles.navTabText}>Pedidos</Text>
+          <View style={styles.navActivePill}>
+            <Text style={styles.navActiveText}>Menú</Text>
+          </View>
+          <TouchableOpacity onPress={() => navigation.navigate('Orders')}>
+            <Text style={styles.navLinkYellow}>Pedidos</Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.logoutButton}
-            onPress={() => navigation.goBack()}
-          >
-            <Text style={styles.logoutText}>Volver</Text>
-          </TouchableOpacity>
+          {isAdmin && (
+            <TouchableOpacity
+              onPress={() => navigation.navigate('Register', { isAdminCreating: true })}
+            >
+              <Text style={styles.navLinkYellow}>Nuevo usuario</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
-      <Text style={styles.title}>Gestión de Menú - Don Bigotes</Text>
-      <Text style={styles.subtitle}>Control completo de platillos y disponibilidad</Text>
+      <Text style={styles.pageTitle}>Gestión de Menú - Don Bigotes</Text>
+      <Text style={styles.pageSubtitle}>Control Completo de Platillos y Disponibilidad</Text>
 
-      {/* Panel Exclusivo Admin para Agregar Platillos */}
-      {userRole === 'admin' && (
-        <View style={styles.formCard}>
-          <Text style={styles.formTitle}>Agregar Nuevo Platillo</Text>
+      <View style={styles.formCard}>
+        <Text style={styles.formTitle}>Agregar Nuevo Platillo</Text>
+
+        <View style={styles.formRow}>
           <TextInput
-            style={styles.input}
-            placeholder="Nombre (Ej. Tacos al Pastor)"
-            value={newNombre}
-            onChangeText={setNewNombre}
+            style={[styles.input, styles.flexInput]}
+            placeholder="Nombre"
+            placeholderTextColor="#9ca3af"
+            value={nombre}
+            onChangeText={setNombre}
           />
+
           <TextInput
-            style={styles.input}
+            style={[styles.input, styles.priceInput]}
             placeholder="Precio ($)"
-            keyboardCurrency="numeric"
-            keyboardType="numeric"
-            value={newPrecio}
-            onChangeText={setNewPrecio}
+            placeholderTextColor="#9ca3af"
+            value={precio}
+            onChangeText={setPrecio}
+            keyboardType="decimal-pad"
           />
+
+          <View style={styles.dropdownWrapper}>
+            <TouchableOpacity
+              style={styles.dropdownButton}
+              onPress={() => setDropdownOpen((prev) => !prev)}
+            >
+              <Text style={styles.dropdownButtonText}>{categoria}</Text>
+              <Text style={styles.caret}>▾</Text>
+            </TouchableOpacity>
+
+            {dropdownOpen && (
+              <View style={styles.dropdownMenu}>
+                {CATEGORIES.map((cat) => {
+                  const selected = cat === categoria;
+                  return (
+                    <TouchableOpacity
+                      key={cat}
+                      style={[styles.dropdownItem, selected && styles.dropdownItemSelected]}
+                      onPress={() => {
+                        setCategoria(cat);
+                        setDropdownOpen(false);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.dropdownItemText,
+                          selected && styles.dropdownItemTextSelected,
+                        ]}
+                      >
+                        {cat}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+
           <TouchableOpacity
             style={styles.addButton}
-            onPress={handleCreateProduct}
+            onPress={handleAddDish}
             disabled={saving}
           >
             {saving ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <Text style={styles.addButtonText}>+ Agregar Platillo</Text>
+              <Text style={styles.addButtonText}>+ Agregar</Text>
             )}
           </TouchableOpacity>
         </View>
-      )}
 
-      <Text style={styles.sectionTitle}>Catálogo Actual</Text>
+        <TextInput
+          style={[styles.input, { marginTop: 10 }]}
+          placeholder="Descripción corta"
+          placeholderTextColor="#9ca3af"
+          value={descripcion}
+          onChangeText={setDescripcion}
+        />
+      </View>
 
       {loading ? (
         <ActivityIndicator size="large" color="#5c1d24" style={{ marginTop: 20 }} />
       ) : (
-        products.map((item) => (
-          <View key={item.id} style={styles.productCard}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.productName}>{item.nombre}</Text>
-              <Text style={styles.productPrice}>${item.precio.toFixed(2)}</Text>
-              <Text
-                style={[
-                  styles.statusText,
-                  { color: item.disponible !== false ? '#16a34a' : '#dc2626' },
-                ]}
-              >
-                {item.disponible !== false ? '• Disponible' : '• Agotado'}
-              </Text>
-            </View>
+        <View style={styles.cardsGrid}>
+          {dishes.map((dish) => (
+            <View key={dish.id} style={styles.dishCard}>
+              <View style={styles.dishTopRow}>
+                <Text style={styles.dishName} numberOfLines={1}>
+                  {dish.nombre}
+                </Text>
+                <View style={styles.dishPriceDeleteRow}>
+                  <Text style={styles.dishPrice}>${dish.precio.toFixed(2)}</Text>
+                  <TouchableOpacity
+                    style={styles.deleteMiniBtn}
+                    onPress={() => handleDeleteDish(dish)}
+                  >
+                    <Text style={styles.deleteMiniText}>×</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
 
-            <View style={styles.cardActions}>
-              {(userRole === 'admin' || userRole === 'encargado') && (
+              <View style={styles.categoryChip}>
+                <Text style={styles.categoryChipText}>{dish.categoria}</Text>
+              </View>
+
+              {!!dish.descripcion && (
+                <Text style={styles.dishDesc} numberOfLines={2}>
+                  {dish.descripcion}
+                </Text>
+              )}
+
+              <View style={styles.dishDivider} />
+
+              <View style={styles.dishFooterRow}>
+                <Text
+                  style={[
+                    styles.statusLabel,
+                    { color: dish.disponible ? '#16a34a' : '#dc2626' },
+                  ]}
+                >
+                  • {dish.disponible ? 'Disponible' : 'Agotado'}
+                </Text>
+
                 <TouchableOpacity
                   style={[
-                    styles.toggleBtn,
-                    { backgroundColor: item.disponible !== false ? '#16a34a' : '#d97706' },
+                    styles.toggleAvailabilityBtn,
+                    dish.disponible ? styles.btnMarkSoldOut : styles.btnMarkAvailable,
                   ]}
-                  onPress={() => handleToggleAvailability(item.id, item.disponible ?? true)}
+                  onPress={() => handleToggleAvailability(dish)}
                 >
-                  <Text style={styles.toggleButtonText}>
-                    {item.disponible !== false ? 'Marcar Agotado' : 'Marcar Disponible'}
+                  <Text
+                    style={[
+                      styles.toggleAvailabilityText,
+                      dish.disponible ? styles.textMarkSoldOut : styles.textMarkAvailable,
+                    ]}
+                  >
+                    {dish.disponible ? 'Marcar Agotado' : 'Marcar Disponible'}
                   </Text>
                 </TouchableOpacity>
-              )}
-
-              {userRole === 'admin' && (
-                <TouchableOpacity
-                  style={styles.deleteBtn}
-                  onPress={() => handleDeleteProduct(item.id)}
-                >
-                  <Text style={styles.deleteButtonText}>Eliminar</Text>
-                </TouchableOpacity>
-              )}
+              </View>
             </View>
-          </View>
-        ))
+          ))}
+        </View>
       )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FDFBF7', padding: 15 },
-  navbar: {
+  container: { flex: 1, backgroundColor: '#efe4d2' },
+  content: { padding: 14, paddingBottom: 32 },
+  topNav: {
     backgroundColor: '#5c1d24',
-    padding: 12,
     borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+  },
+  topNavHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 15,
-    flexWrap: 'wrap',
-    gap: 10,
+    marginBottom: 8,
   },
-  navBrand: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  navActions: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  navTab: { paddingHorizontal: 8, paddingVertical: 4 },
-  navTabActive: { backgroundColor: '#7a2831', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
-  navTabText: { color: '#ffd700', fontWeight: '600', fontSize: 13 },
-  navTabTextActive: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
-  logoutButton: { backgroundColor: '#4a154b', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  logoutText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#5c1d24', textAlign: 'center' },
-  subtitle: { fontSize: 13, color: '#666', textAlign: 'center', marginBottom: 15 },
+  navBrand: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  logoutBtn: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  logoutBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  navLinks: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  navLinkYellow: { color: '#fbbf24', fontWeight: '700', fontSize: 13 },
+  navActivePill: {
+    backgroundColor: '#7a2831',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  navActiveText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  pageTitle: { fontSize: 22, fontWeight: '800', color: '#2b1b17' },
+  pageSubtitle: { fontSize: 13, color: '#6b5c54', marginTop: 2, marginBottom: 14 },
+
   formCard: {
     backgroundColor: '#fff',
-    padding: 16,
     borderRadius: 10,
-    marginBottom: 18,
+    padding: 14,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#e6d8c5',
+    marginBottom: 16,
+    zIndex: 20,
   },
-  formTitle: { fontSize: 15, fontWeight: '600', marginBottom: 10, color: '#333' },
+  formTitle: { fontSize: 16, fontWeight: '700', color: '#2b1b17', marginBottom: 12 },
+  formRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+    zIndex: 20,
+  },
   input: {
     height: 40,
     borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
+    borderColor: '#d1d5db',
+    borderRadius: 6,
     paddingHorizontal: 10,
-    marginBottom: 10,
-    backgroundColor: '#fafafa',
+    backgroundColor: '#fff',
+    fontSize: 14,
+    color: '#1f2937',
   },
+  flexInput: { flex: 1, minWidth: 140 },
+  priceInput: { width: 95 },
+
+  dropdownWrapper: { position: 'relative', minWidth: 120, zIndex: 30 },
+  dropdownButton: {
+    height: 40,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    backgroundColor: '#fff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownButtonText: { fontSize: 13, color: '#111827', fontWeight: '500' },
+  caret: { fontSize: 12, color: '#111827', marginLeft: 6 },
+  dropdownMenu: {
+    position: 'absolute',
+    top: 42,
+    left: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 6,
+    elevation: 6,
+    zIndex: 50,
+    overflow: 'hidden',
+  },
+  dropdownItem: { paddingHorizontal: 10, paddingVertical: 8 },
+  dropdownItemSelected: { backgroundColor: '#1d4ed8' },
+  dropdownItemText: { fontSize: 13, color: '#111827' },
+  dropdownItemTextSelected: { color: '#fff', fontWeight: '600' },
+
   addButton: {
-    backgroundColor: '#5c1d24',
-    padding: 12,
-    borderRadius: 8,
+    height: 40,
+    backgroundColor: '#b45309',
+    paddingHorizontal: 18,
+    borderRadius: 6,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  addButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#4a154b', marginBottom: 10 },
-  productCard: {
+  addButtonText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+
+  cardsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  dishCard: {
+    width: '100%',
     backgroundColor: '#fff',
+    borderRadius: 10,
     padding: 14,
-    borderRadius: 8,
-    marginBottom: 10,
     borderWidth: 1,
-    borderColor: '#eee',
+    borderColor: '#e6d8c5',
+  },
+  dishTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dishName: { fontSize: 16, fontWeight: '700', color: '#1f2937', flex: 1 },
+  dishPriceDeleteRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dishPrice: { fontSize: 16, fontWeight: '800', color: '#16a34a' },
+  deleteMiniBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#fca5a5',
+    backgroundColor: '#fff5f5',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deleteMiniText: { color: '#ef4444', fontSize: 15, fontWeight: '700', lineHeight: 17 },
+  categoryChip: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#f3f4f6',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 5,
+    marginTop: 8,
+  },
+  categoryChipText: { fontSize: 11, color: '#4b5563', fontWeight: '600' },
+  dishDesc: { fontSize: 12, color: '#6b7280', marginTop: 6 },
+  dishDivider: { height: 1, backgroundColor: '#f3ece2', marginVertical: 12 },
+  dishFooterRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  productName: { fontSize: 15, fontWeight: 'bold', color: '#333' },
-  productPrice: { fontSize: 13, color: '#5c1d24', fontWeight: 'bold', marginVertical: 2 },
-  statusText: { fontSize: 12, fontWeight: '600' },
-  cardActions: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  toggleBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  toggleButtonText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
-  deleteBtn: { backgroundColor: '#dc2626', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  deleteButtonText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
+  statusLabel: { fontSize: 13, fontWeight: '700' },
+  toggleAvailabilityBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 7,
+  },
+  btnMarkSoldOut: { backgroundColor: '#fee2e2' },
+  textMarkSoldOut: { color: '#dc2626', fontWeight: '700', fontSize: 12 },
+  btnMarkAvailable: { backgroundColor: '#fef3c7' },
+  textMarkAvailable: { color: '#b45309', fontWeight: '700', fontSize: 12 },
 });

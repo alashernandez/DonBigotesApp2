@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "251022172595",
+    "project_id": "donbigotesapp-f71ee",
+    "storage_bucket": "donbigotesapp-f71ee.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:251022172595:android:30d54394aa681aca0f6bc6",
+        "android_client_info": {
+          "package_name": "com.donbigotes.mobile"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "251022172595-meqrv747pq30duv88214s36fssuo7iq5.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.donbigotes.mobile",
+            "certificate_hash": "5e8f16062ea3cd2c4a0d547876baa6f38cabf625"
+          }
+        },
+        {
+          "client_id": "251022172595-rkhukg31ell4o5aronp9hd5k806mq8ek.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDRTvPHSyiJgRYuX6ydfJDUCUh4ynRYZxQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "251022172595-rkhukg31ell4o5aronp9hd5k806mq8ek.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -7,6 +7,7 @@ import HomeScreen from './src/screens/HomeScreen';
 import RegisterScreen from './src/screens/RegisterScreen';
 import MenuScreen from './src/screens/MenuScreen'; // Importar el menú
 import OrdersScreen from './src/screens/OrdersScreen'; // Importar pedidos
+import ClientDashboardScreen from './src/screens/ClientDashboardScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -39,6 +40,11 @@ export default function App() {
             name="Orders" 
             component={OrdersScreen} 
             options={{ title: 'Pedidos' }} 
+          />
+          <Stack.Screen
+            name="ClientDashboard"
+            component={ClientDashboardScreen}
+            options={{ headerShown: false }}
           />
         </Stack.Navigator>
       </NavigationContainer>

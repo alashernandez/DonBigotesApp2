@@ -4,316 +4,289 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  ScrollView,
   StyleSheet,
   ActivityIndicator,
-  Platform,
   Alert,
-  ScrollView,
+  Platform,
 } from 'react-native';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db } from '../services/firebaseConfig';
 
-type UserRole = 'cliente' | 'encargado' | 'admin';
+const ROLES = ['cliente', 'encargado', 'admin'] as const;
+type RoleType = (typeof ROLES)[number];
 
 export default function RegisterScreen({ navigation, route }: any) {
-  // Si el Admin abre esta pantalla desde su panel, activamos la selección de roles administrativos
-  const isAdminCreating = route?.params?.isAdminCreating || false;
+  const isAdminCreating = Boolean(route?.params?.isAdminCreating);
 
-  const [name, setName] = useState('');
+  const [nombre, setNombre] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [selectedRole, setSelectedRole] = useState<UserRole>(
-    isAdminCreating ? 'encargado' : 'cliente'
-  );
-  const [loading, setLoading] = useState(false);
+  const [role, setRole] = useState<RoleType>('cliente');
+  const [saving, setSaving] = useState(false);
 
-  const showNotification = (title: string, message: string) => {
+  const notify = (title: string, msg: string) => {
     if (Platform.OS === 'web') {
-      window.alert(`${title}: ${message}`);
+      window.alert(`${title}: ${msg}`);
     } else {
-      Alert.alert(title, message);
+      Alert.alert(title, msg);
     }
   };
 
-  const handleRegister = async () => {
-    if (!name.trim() || !email.trim() || !password.trim()) {
-      showNotification('Campos incompletos', 'Por favor completa todos los campos obligatorios.');
-      return;
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      navigation.replace('Login');
+    } catch (error) {
+      console.error('Error al cerrar sesión:', error);
+      notify('Error', 'No se pudo cerrar sesión.');
     }
+  };
 
-    if (password.length < 6) {
-      showNotification('Contraseña débil', 'La contraseña debe tener al menos 6 caracteres.');
-      return;
-    }
+  const handleCreateUser = async () => {
+    const cleanName = nombre.trim();
+    const cleanEmail = email.trim().toLowerCase();
 
-    if (password !== confirmPassword) {
-      showNotification('Error', 'Las contraseñas no coinciden.');
+    if (!cleanName || !cleanEmail || password.length < 6) {
+      notify(
+        'Datos incompletos',
+        'Ingresa nombre, correo válido y contraseña de al menos 6 caracteres.'
+      );
       return;
     }
 
     try {
-      setLoading(true);
+      setSaving(true);
+      const cred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+      const newUid = cred.user.uid;
 
-      // 1. Crear el usuario en Firebase Authentication
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        email.trim(),
-        password
-      );
-      const user = userCredential.user;
-
-      // 2. Guardar su perfil y rol en la colección 'users' de Firestore
-      const roleToAssign: UserRole = isAdminCreating ? selectedRole : 'cliente';
-
-      await setDoc(doc(db, 'users', user.uid), {
-        uid: user.uid,
-        nombre: name.trim(),
-        email: user.email,
-        role: roleToAssign,
+      await setDoc(doc(db, 'users', newUid), {
+        uid: newUid,
+        nombre: cleanName,
+        email: cleanEmail,
+        role: isAdminCreating ? role : 'cliente',
         createdAt: serverTimestamp(),
       });
 
-      showNotification(
-        'Registro exitoso',
-        isAdminCreating
-          ? `Usuario ${name.trim()} creado con rol de ${roleToAssign.toUpperCase()}.`
-          : 'Tu cuenta de cliente ha sido creada. ¡Bienvenido a Don Bigotes!'
-      );
+      setNombre('');
+      setEmail('');
+      setPassword('');
+      setRole('cliente');
 
-      // Si lo creó el Admin regresamos al panel; si es cliente nuevo va directo a su menú
+      notify('Usuario registrado', 'La cuenta y el perfil en Firestore fueron creados.');
+
       if (isAdminCreating) {
-        navigation.goBack();
+        navigation.navigate('Home');
       } else {
         navigation.replace('Home');
       }
     } catch (error: any) {
       console.error('Error al registrar usuario:', error);
-      let errorMsg = 'Ocurrió un error al crear la cuenta.';
+      let msg = 'No se pudo registrar el usuario.';
       if (error.code === 'auth/email-already-in-use') {
-        errorMsg = 'Este correo electrónico ya está registrado.';
+        msg = 'Ese correo electrónico ya está registrado.';
       } else if (error.code === 'auth/invalid-email') {
-        errorMsg = 'El formato del correo electrónico no es válido.';
+        msg = 'El correo electrónico no es válido.';
+      } else if (error.code === 'auth/weak-password') {
+        msg = 'La contraseña debe tener al menos 6 caracteres.';
       }
-      showNotification('Error de registro', errorMsg);
+      notify('Error', msg);
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
+      {auth.currentUser && (
+        <View style={styles.topNav}>
+          <View style={styles.topNavHeader}>
+            <Text style={styles.navBrand}>Don Bigotes</Text>
+            <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+              <Text style={styles.logoutBtnText}>Salir</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.navLinks}>
+            <TouchableOpacity onPress={() => navigation.navigate('Home')}>
+              <Text style={styles.navLinkYellow}>Dashboard</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('Menu')}>
+              <Text style={styles.navLinkYellow}>Menú</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('Orders')}>
+              <Text style={styles.navLinkYellow}>Pedidos</Text>
+            </TouchableOpacity>
+            <View style={styles.navActivePill}>
+              <Text style={styles.navActiveText}>Nuevo usuario</Text>
+            </View>
+          </View>
+        </View>
+      )}
+
       <View style={styles.card}>
         <Text style={styles.title}>
-          {isAdminCreating ? 'Registrar Nuevo Personal' : 'Crear Cuenta'}
+          {isAdminCreating ? 'Nuevo usuario' : 'Crear cuenta'}
         </Text>
-        <Text style={styles.subtitle}>
-          {isAdminCreating
-            ? 'Asigna credenciales y nivel de acceso - Don Bigotes'
-            : 'Regístrate para ordenar en Comedor Don Bigotes'}
-        </Text>
+        <Text style={styles.subtitle}>Don Bigotes · Gestión de accesos</Text>
 
         <Text style={styles.label}>Nombre completo</Text>
         <TextInput
           style={styles.input}
-          placeholder="Ej. Carlos Alas / Doña Rosa"
-          value={name}
-          onChangeText={setName}
+          placeholder="Ej. Carlos Alas"
+          placeholderTextColor="#9ca3af"
+          value={nombre}
+          onChangeText={setNombre}
         />
 
         <Text style={styles.label}>Correo electrónico</Text>
         <TextInput
           style={styles.input}
-          placeholder="correo@ejemplo.com"
-          keyboardType="email-address"
-          autoCapitalize="none"
+          placeholder="usuario@donbigotes.com"
+          placeholderTextColor="#9ca3af"
           value={email}
           onChangeText={setEmail}
+          autoCapitalize="none"
+          keyboardType="email-address"
         />
 
         <Text style={styles.label}>Contraseña</Text>
         <TextInput
           style={styles.input}
           placeholder="Mínimo 6 caracteres"
-          secureTextEntry
+          placeholderTextColor="#9ca3af"
           value={password}
           onChangeText={setPassword}
-        />
-
-        <Text style={styles.label}>Confirmar contraseña</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Repite tu contraseña"
           secureTextEntry
-          value={confirmPassword}
-          onChangeText={setConfirmPassword}
         />
 
-        {/* Selector de rol visible SOLO cuando el Admin abre la pantalla */}
         {isAdminCreating && (
-          <View style={styles.roleSection}>
-            <Text style={styles.label}>Selecciona el Rol del Usuario:</Text>
-            <View style={styles.roleRow}>
-              <TouchableOpacity
-                style={[
-                  styles.roleOption,
-                  selectedRole === 'encargado' && styles.roleOptionActive,
-                ]}
-                onPress={() => setSelectedRole('encargado')}
-              >
-                <Text
-                  style={[
-                    styles.roleOptionText,
-                    selectedRole === 'encargado' && styles.roleOptionTextActive,
-                  ]}
-                >
-                  Encargado
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.roleOption,
-                  selectedRole === 'admin' && styles.roleOptionActive,
-                ]}
-                onPress={() => setSelectedRole('admin')}
-              >
-                <Text
-                  style={[
-                    styles.roleOptionText,
-                    selectedRole === 'admin' && styles.roleOptionTextActive,
-                  ]}
-                >
-                  Admin
-                </Text>
-              </TouchableOpacity>
+          <>
+            <Text style={styles.label}>Rol</Text>
+            <View style={styles.rolesRow}>
+              {ROLES.map((r) => {
+                const active = role === r;
+                return (
+                  <TouchableOpacity
+                    key={r}
+                    style={[styles.roleChip, active && styles.roleChipActive]}
+                    onPress={() => setRole(r)}
+                  >
+                    <Text style={[styles.roleChipText, active && styles.roleChipTextActive]}>
+                      {r.toUpperCase()}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
-          </View>
+          </>
         )}
 
         <TouchableOpacity
-          style={styles.button}
-          onPress={handleRegister}
-          disabled={loading}
+          style={[styles.submitBtn, saving && { opacity: 0.7 }]}
+          onPress={handleCreateUser}
+          disabled={saving}
         >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
+          {saving ? (
+            <ActivityIndicator color="#fff" size="small" />
           ) : (
-            <Text style={styles.buttonText}>
-              {isAdminCreating ? 'Crear Usuario' : 'Registrarme'}
-            </Text>
+            <Text style={styles.submitBtnText}>Registrar usuario</Text>
           )}
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.linkButton}
-          onPress={() => navigation.goBack()}
-        >
-          <Text style={styles.linkText}>
-            {isAdminCreating
-              ? '← Cancelar y volver'
-              : '¿Ya tienes cuenta? Inicia sesión aquí'}
-          </Text>
-        </TouchableOpacity>
+        {!auth.currentUser && (
+          <TouchableOpacity
+            style={styles.backLoginBtn}
+            onPress={() => navigation.navigate('Login')}
+          >
+            <Text style={styles.backLoginText}>¿Ya tienes cuenta? Inicia sesión</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: 20,
-    backgroundColor: '#FDFBF7',
+  screen: { flex: 1, backgroundColor: '#efe4d2' },
+  content: { padding: 14, paddingBottom: 32 },
+  topNav: {
+    backgroundColor: '#5c1d24',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
   },
+  topNavHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  navBrand: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  logoutBtn: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  logoutBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  navLinks: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  navLinkYellow: { color: '#fbbf24', fontWeight: '700', fontSize: 13 },
+  navActivePill: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  navActiveText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+
   card: {
     backgroundColor: '#fff',
-    padding: 24,
     borderRadius: 12,
+    padding: 18,
     borderWidth: 1,
-    borderColor: '#e5e0d8',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 3,
+    borderColor: '#e6d8c5',
   },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#5c1d24',
-    textAlign: 'center',
-    marginBottom: 4,
-  },
-  subtitle: {
-    fontSize: 13,
-    color: '#666',
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 6,
-  },
+  title: { fontSize: 22, fontWeight: '800', color: '#5c1d24' },
+  subtitle: { fontSize: 13, color: '#6b5c54', marginTop: 2, marginBottom: 14 },
+  label: { fontSize: 13, fontWeight: '600', color: '#2b1b17', marginTop: 10, marginBottom: 6 },
   input: {
-    height: 44,
+    height: 42,
     borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 8,
+    borderColor: '#d1d5db',
+    borderRadius: 7,
     paddingHorizontal: 12,
-    marginBottom: 14,
-    backgroundColor: '#fafafa',
-  },
-  roleSection: {
-    marginBottom: 16,
-  },
-  roleRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  roleOption: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#5c1d24',
-    alignItems: 'center',
     backgroundColor: '#fff',
-  },
-  roleOptionActive: {
-    backgroundColor: '#5c1d24',
-  },
-  roleOptionText: {
-    color: '#5c1d24',
-    fontWeight: 'bold',
     fontSize: 14,
+    color: '#1f2937',
   },
-  roleOptionTextActive: {
-    color: '#fff',
+  rolesRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  roleChip: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 7,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    alignItems: 'center',
   },
-  button: {
+  roleChipActive: { backgroundColor: '#5c1d24', borderColor: '#5c1d24' },
+  roleChipText: { fontSize: 12, fontWeight: '700', color: '#374151' },
+  roleChipTextActive: { color: '#fff' },
+  submitBtn: {
+    marginTop: 18,
+    height: 44,
     backgroundColor: '#5c1d24',
-    paddingVertical: 13,
     borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  buttonText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  linkButton: {
-    marginTop: 16,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  linkText: {
-    color: '#4a154b',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  submitBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  backLoginBtn: { marginTop: 14, alignItems: 'center' },
+  backLoginText: { color: '#5c1d24', fontSize: 13, fontWeight: '600' },
 });

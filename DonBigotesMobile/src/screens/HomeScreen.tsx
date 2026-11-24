@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,13 +8,9 @@ import {
   ActivityIndicator,
   Platform,
   Alert,
+  RefreshControl,
 } from 'react-native';
-import {
-  collection,
-  onSnapshot,
-  addDoc,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
 import { db, auth } from '../services/firebaseConfig';
 
@@ -30,7 +26,7 @@ interface OrderItem {
   clientName: string;
   items: string;
   total: number;
-  status: 'Pendiente' | 'En preparación' | 'Entregado';
+  status: string;
   createdAtDate: Date;
 }
 
@@ -39,28 +35,35 @@ interface TopDish {
   quantity: number;
 }
 
+interface DailySalesRow {
+  dateKey: string;
+  label: string;
+  orders: number;
+  revenue: number;
+}
+
+function toDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function normalizeStatus(raw: string): string {
+  return (raw || 'Pendiente').trim().toLowerCase();
+}
+
 export default function HomeScreen({ navigation }: any) {
-  const [userRole, setUserRole] = useState<'admin' | 'encargado' | 'cliente'>('cliente');
+  const [userRole, setUserRole] = useState<'admin' | 'encargado'>('encargado');
   const [userName, setUserName] = useState('Usuario');
   const [loadingUser, setLoadingUser] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Estados generales de datos
   const [products, setProducts] = useState<Product[]>([]);
   const [allOrders, setAllOrders] = useState<OrderItem[]>([]);
 
-  // Estados exclusivos para Cliente
-  const [selectedItems, setSelectedItems] = useState<{ [key: string]: number }>({});
-  const [clientOrders, setClientOrders] = useState<OrderItem[]>([]);
-  const [savingOrder, setSavingOrder] = useState(false);
-  const [showMyOrders, setShowMyOrders] = useState(false);
-
-  // Métricas rápidas de hoy (Admin / Encargado)
-  const [todayOrdersCount, setTodayOrdersCount] = useState(0);
-  const [availableProductsCount, setAvailableProductsCount] = useState(0);
-  const [todaySalesSum, setTodaySalesSum] = useState(0);
-
-  // Estados de Analítica (Exclusivo Admin)
-  const [reportPeriod, setReportPeriod] = useState<'today' | 'week'>('today');
+  // Tabla de últimos 7 días en vista Admin
+  const [showSevenDaysTable, setShowSevenDaysTable] = useState(true);
 
   const showNotification = (title: string, message: string) => {
     if (Platform.OS === 'web') {
@@ -70,7 +73,7 @@ export default function HomeScreen({ navigation }: any) {
     }
   };
 
-  // 1. Obtener perfil y rol del usuario actual
+  // 1. Obtener perfil y rol del usuario actual desde Firestore (`users`)
   useEffect(() => {
     const currentUser = auth.currentUser;
     if (!currentUser) {
@@ -84,69 +87,71 @@ export default function HomeScreen({ navigation }: any) {
       );
       if (userDoc) {
         const data = userDoc.data();
-        setUserRole(data.role || 'cliente');
+        const rawRole = String(data.role || 'cliente').toLowerCase();
+
+        if (rawRole === 'cliente') {
+          setLoadingUser(false);
+          navigation.replace('ClientDashboard');
+          return;
+        }
+
+        if (rawRole === 'admin' || rawRole === 'encargado') {
+          setUserRole(rawRole);
+        } else {
+          setUserRole('encargado');
+        }
         setUserName(data.nombre || currentUser.email || 'Usuario');
       }
       setLoadingUser(false);
     });
 
     return () => unsubscribeUser();
-  }, []);
+  }, [navigation]);
 
-  // 2. Cargar productos y pedidos en tiempo real
+  // 2. Cargar productos (`productos`) y pedidos (`orders`) en tiempo real
   useEffect(() => {
     const unsubProducts = onSnapshot(collection(db, 'productos'), (snapshot) => {
-      const list: Product[] = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        nombre: docSnap.data().nombre || 'Sin nombre',
-        precio: Number(docSnap.data().precio || 0),
-        disponible: docSnap.data().disponible ?? true,
-      }));
+      const list: Product[] = snapshot.docs.map((docSnap) => {
+        const raw = docSnap.data();
+        const isAvailable =
+          typeof raw.disponible === 'boolean'
+            ? raw.disponible
+            : typeof raw.available === 'boolean'
+            ? raw.available
+            : true;
+
+        return {
+          id: docSnap.id,
+          nombre: raw.nombre || raw.name || 'Sin nombre',
+          precio: Number(raw.precio ?? raw.price ?? 0),
+          disponible: isAvailable,
+        };
+      });
       setProducts(list);
-      setAvailableProductsCount(list.filter((p) => p.disponible !== false).length);
     });
 
-    const currentUser = auth.currentUser;
-    const todayStr = new Date().toDateString();
-
     const unsubOrders = onSnapshot(collection(db, 'orders'), (snapshot) => {
-      let countToday = 0;
-      let sumTodaySales = 0;
-      const myOrdersList: OrderItem[] = [];
-      const fetchedOrders: OrderItem[] = [];
+      const fetchedOrders: OrderItem[] = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data();
+        const createdAt = data.createdAt?.toDate
+          ? data.createdAt.toDate()
+          : data.createdAt
+          ? new Date(data.createdAt)
+          : new Date();
+        const orderTotal = Number(data.total ?? 0);
+        const safeTotal = Number.isNaN(orderTotal) ? 0 : orderTotal;
 
-      snapshot.docs.forEach((doc) => {
-        const data = doc.data();
-        const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-        const orderTotal = Number(data.total || 0);
-        const safeTotal = isNaN(orderTotal) ? 0 : orderTotal;
-
-        const orderObj: OrderItem = {
-          id: doc.id,
+        return {
+          id: docSnap.id,
           clientName: data.clientName || 'Cliente',
           items: data.items || '',
           total: safeTotal,
           status: data.status || 'Pendiente',
           createdAtDate: createdAt,
         };
-
-        fetchedOrders.push(orderObj);
-
-        const isToday = createdAt.toDateString() === todayStr || !data.createdAt;
-        if (isToday) {
-          countToday += 1;
-          sumTodaySales += safeTotal;
-        }
-
-        if (currentUser && data.clientEmail === currentUser.email) {
-          myOrdersList.push(orderObj);
-        }
       });
 
       setAllOrders(fetchedOrders);
-      setTodayOrdersCount(countToday);
-      setTodaySalesSum(sumTodaySales);
-      setClientOrders(myOrdersList);
     });
 
     return () => {
@@ -155,114 +160,181 @@ export default function HomeScreen({ navigation }: any) {
     };
   }, []);
 
-  // 3. Procesar analítica por día o semana (Exclusivo Admin)
-  const getAdminAnalytics = () => {
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 400);
+  }, []);
+
+  // 3. Calcular resumen alineado a DashboardSummary (Web)
+  const getDashboardSummary = () => {
     const now = new Date();
-    const todayStr = now.toDateString();
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(now.getDate() - 7);
-    sevenDaysAgo.setHours(0, 0, 0, 0);
+    const todayKey = toDateKey(now);
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    const filteredOrders = allOrders.filter((ord) => {
-      if (reportPeriod === 'today') {
-        return ord.createdAtDate.toDateString() === todayStr;
+    // Lunes de esta semana (00:00:00)
+    const dayOfWeek = startOfToday.getDay();
+    const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfToday.getDate() - diffToMonday);
+
+    // Día 1 del mes actual (00:00:00)
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Ventana de últimos 7 días (hace 6 días hasta hoy = 7 días)
+    const startOf7Days = new Date(startOfToday);
+    startOf7Days.setDate(startOfToday.getDate() - 6);
+
+    const availableDishes = products.filter((p) => p.disponible !== false).length;
+    const totalDishes = products.length;
+
+    let ordersToday = 0;
+    let cancelledToday = 0;
+    let saleToday = 0;
+    let revenueToday = 0;
+    let pendingRevenueToday = 0;
+
+    let weekRevenue = 0;
+    let weekOrders = 0;
+
+    let monthRevenue = 0;
+    let monthOrders = 0;
+
+    const activeOrders: OrderItem[] = [];
+    const statusCounts: Record<string, number> = {};
+    const dishCounts7Days: Record<string, number> = {};
+
+    const last7DaysMap: Record<string, DailySalesRow> = {};
+    const last7DaysList: DailySalesRow[] = [];
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(startOfToday);
+      d.setDate(startOfToday.getDate() - i);
+      const key = toDateKey(d);
+      const label =
+        i === 0
+          ? 'Hoy'
+          : d.toLocaleDateString('es-ES', {
+              weekday: 'short',
+              day: 'numeric',
+            });
+      const row: DailySalesRow = { dateKey: key, label, orders: 0, revenue: 0 };
+      last7DaysMap[key] = row;
+      last7DaysList.push(row);
+    }
+
+    const sortedOrders = [...allOrders].sort(
+      (a, b) => a.createdAtDate.getTime() - b.createdAtDate.getTime()
+    );
+
+    sortedOrders.forEach((ord) => {
+      const st = normalizeStatus(ord.status);
+      const isCancelled = st === 'cancelado' || st === 'cancelada';
+      const isDelivered =
+        st === 'entregado' || st === 'entregada' || st === 'completado';
+      const isInProgress =
+        st === 'pendiente' ||
+        st === 'en preparación' ||
+        st === 'en preparacion' ||
+        st === 'listo para entregar' ||
+        st === 'listo';
+
+      const ordDate = ord.createdAtDate;
+      const isToday = toDateKey(ordDate) === todayKey;
+
+      if (isInProgress) {
+        activeOrders.push(ord);
       }
-      return ord.createdAtDate >= sevenDaysAgo;
-    });
 
-    const periodSales = filteredOrders.reduce((acc, ord) => acc + ord.total, 0);
-    const periodOrdersCount = filteredOrders.length;
+      if (isToday) {
+        statusCounts[ord.status] = (statusCounts[ord.status] || 0) + 1;
 
-    // Agrupar platillos vendidos leyendo el formato "2x Tacos, 1x Café"
-    const dishCounts: { [name: string]: number } = {};
-
-    filteredOrders.forEach((ord) => {
-      if (!ord.items) return;
-      const parts = ord.items.split(',');
-      parts.forEach((part) => {
-        const trimmed = part.trim();
-        const match = trimmed.match(/^(\d+)x\s+(.+)$/i);
-        if (match) {
-          const qty = parseInt(match[1], 10);
-          const dishName = match[2].trim();
-          dishCounts[dishName] = (dishCounts[dishName] || 0) + qty;
-        } else if (trimmed) {
-          dishCounts[trimmed] = (dishCounts[trimmed] || 0) + 1;
+        if (isCancelled) {
+          cancelledToday += 1;
+        } else {
+          ordersToday += 1;
         }
-      });
+
+        if (isDelivered) {
+          saleToday += 1;
+          revenueToday += ord.total;
+        } else if (!isCancelled) {
+          pendingRevenueToday += ord.total;
+        }
+      }
+
+      if (!isCancelled && ordDate >= startOfWeek) {
+        weekOrders += 1;
+        if (isDelivered) {
+          weekRevenue += ord.total;
+        }
+      }
+
+      if (isDelivered && ordDate >= startOfMonth) {
+        monthOrders += 1;
+        monthRevenue += ord.total;
+      }
+
+      const ordDayStart = new Date(
+        ordDate.getFullYear(),
+        ordDate.getMonth(),
+        ordDate.getDate()
+      );
+      if (
+        !isCancelled &&
+        ordDayStart >= startOf7Days &&
+        ordDayStart <= startOfToday
+      ) {
+        const key = toDateKey(ordDayStart);
+        if (last7DaysMap[key]) {
+          last7DaysMap[key].orders += 1;
+          if (isDelivered) {
+            last7DaysMap[key].revenue += ord.total;
+          }
+        }
+
+        if (ord.items) {
+          ord.items.split(',').forEach((part) => {
+            const trimmed = part.trim();
+            const match = trimmed.match(/^(\d+)x\s+(.+)$/i);
+            if (match) {
+              const qty = parseInt(match[1], 10);
+              const dishName = match[2].trim();
+              dishCounts7Days[dishName] = (dishCounts7Days[dishName] || 0) + qty;
+            } else if (trimmed) {
+              dishCounts7Days[trimmed] = (dishCounts7Days[trimmed] || 0) + 1;
+            }
+          });
+        }
+      }
     });
 
-    const topDishes: TopDish[] = Object.entries(dishCounts)
+    const averageTicketMonth = monthOrders > 0 ? monthRevenue / monthOrders : 0;
+    const total7DaysRevenue = last7DaysList.reduce((acc, r) => acc + r.revenue, 0);
+
+    const topDishes: TopDish[] = Object.entries(dishCounts7Days)
       .map(([name, quantity]) => ({ name, quantity }))
       .sort((a, b) => b.quantity - a.quantity);
 
-    return { periodSales, periodOrdersCount, topDishes };
-  };
-
-  // Funciones del Cliente
-  const handleQuantityChange = (id: string, delta: number) => {
-    setSelectedItems((prev) => {
-      const current = prev[id] || 0;
-      const updated = current + delta;
-      if (updated <= 0) {
-        const copy = { ...prev };
-        delete copy[id];
-        return copy;
-      }
-      return { ...prev, [id]: updated };
-    });
-  };
-
-  const calculateOrderDetails = () => {
-    let summaryText = '';
-    let totalPrice = 0;
-
-    Object.entries(selectedItems).forEach(([id, qty]) => {
-      const product = products.find((p) => p.id === id);
-      if (product) {
-        summaryText += `${qty}x ${product.nombre}, `;
-        totalPrice += Number(product.precio || 0) * Number(qty);
-      }
-    });
-
-    if (summaryText.endsWith(', ')) {
-      summaryText = summaryText.slice(0, -2);
-    }
-
-    return { summaryText, totalPrice };
-  };
-
-  const handleSendClientOrder = async () => {
-    const { summaryText, totalPrice } = calculateOrderDetails();
-
-    if (!summaryText) {
-      showNotification('Menú vacío', 'Selecciona al menos un platillo para ordenar.');
-      return;
-    }
-
-    try {
-      setSavingOrder(true);
-      const currentUser = auth.currentUser;
-
-      await addDoc(collection(db, 'orders'), {
-        clientName: userName,
-        clientEmail: currentUser?.email || '',
-        table: 'Pedido en Línea',
-        items: summaryText,
-        total: Number(totalPrice),
-        status: 'Pendiente',
-        createdAt: serverTimestamp(),
-      });
-
-      setSelectedItems({});
-      showNotification('¡Pedido enviado!', 'Tu orden ha sido enviada a cocina exitosamente.');
-      setShowMyOrders(true);
-    } catch (error) {
-      console.error('Error al enviar pedido:', error);
-      showNotification('Error', 'No se pudo enviar el pedido.');
-    } finally {
-      setSavingOrder(false);
-    }
+    return {
+      ordersToday,
+      cancelledToday,
+      inProgressToday: activeOrders.length,
+      availableDishes,
+      totalDishes,
+      saleToday,
+      activeOrders,
+      revenueToday,
+      pendingRevenueToday,
+      weekRevenue,
+      weekOrders,
+      monthRevenue,
+      monthOrders,
+      averageTicketMonth,
+      last7DaysList,
+      total7DaysRevenue,
+      topDishes,
+      statusCounts,
+    };
   };
 
   const handleLogout = async () => {
@@ -271,6 +343,7 @@ export default function HomeScreen({ navigation }: any) {
       navigation.replace('Login');
     } catch (error) {
       console.error('Error al cerrar sesión:', error);
+      showNotification('Error', 'No se pudo cerrar sesión.');
     }
   };
 
@@ -283,34 +356,38 @@ export default function HomeScreen({ navigation }: any) {
     );
   }
 
-  const { periodSales, periodOrdersCount, topDishes } = getAdminAnalytics();
-  const maxDishQty = topDishes.length > 0 ? topDishes[0].quantity : 1;
+  const summary = getDashboardSummary();
+  const maxDishQty = summary.topDishes.length > 0 ? summary.topDishes[0].quantity : 1;
+  const formattedDate = new Date().toLocaleDateString('es-ES', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView
+      style={styles.container}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
       {/* Barra superior de navegación */}
       <View style={styles.navbar}>
         <Text style={styles.navBrand}>Don Bigotes</Text>
         <View style={styles.navActions}>
-          {userRole !== 'cliente' && (
-            <>
-              <TouchableOpacity style={styles.navTabActive}>
-                <Text style={styles.navTabTextActive}>Dashboard</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.navTab}
-                onPress={() => navigation.navigate('Menu')}
-              >
-                <Text style={styles.navTabText}>Menú</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.navTab}
-                onPress={() => navigation.navigate('Orders')}
-              >
-                <Text style={styles.navTabText}>Pedidos</Text>
-              </TouchableOpacity>
-            </>
-          )}
+          <TouchableOpacity style={styles.navTabActive}>
+            <Text style={styles.navTabTextActive}>Dashboard</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.navTab}
+            onPress={() => navigation.navigate('Menu')}
+          >
+            <Text style={styles.navTabText}>Menú</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.navTab}
+            onPress={() => navigation.navigate('Orders')}
+          >
+            <Text style={styles.navTabText}>Pedidos</Text>
+          </TouchableOpacity>
 
           {userRole === 'admin' && (
             <TouchableOpacity
@@ -334,226 +411,174 @@ export default function HomeScreen({ navigation }: any) {
         </View>
       </View>
 
-      {/* Saludo */}
-      <View style={styles.welcomeSection}>
-        <Text style={styles.welcomeTitle}>¡Bienvenido/a, {userName}!</Text>
-        <Text style={styles.roleSubtitle}>
-          {userRole === 'cliente'
-            ? 'Explora el menú disponible y arma tu orden'
-            : `Rol actual: ${userRole}`}
-        </Text>
+      {/* Saludo y fecha */}
+      <View style={styles.welcomeHeaderRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.welcomeTitle}>Bienvenido/a, {userName}</Text>
+          <Text style={styles.roleSubtitle}>
+            Rol actual: {userRole.charAt(0).toUpperCase() + userRole.slice(1)} ·{' '}
+            {formattedDate}
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.refreshChip} onPress={onRefresh}>
+          <Text style={styles.refreshChipText}>Actualizar</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* VISTA EXCLUSIVA PARA CLIENTES */}
-      {userRole === 'cliente' ? (
-        <View>
-          <View style={styles.clientTabRow}>
-            <TouchableOpacity
-              style={[styles.clientTabBtn, !showMyOrders && styles.clientTabBtnActive]}
-              onPress={() => setShowMyOrders(false)}
-            >
-              <Text style={[styles.clientTabText, !showMyOrders && styles.clientTabTextActive]}>
-                🍽️ Menú Disponible
-              </Text>
-            </TouchableOpacity>
+      {/* VISTA PARA ADMIN / ENCARGADO */}
+      <View>
+        {/* 4 métricas principales */}
+        <View style={styles.grid2}>
+          <View style={styles.metricCard}>
+            <Text style={styles.metricCardTitle}>Pedidos de hoy</Text>
+            <Text style={styles.metricCardValue}>{summary.ordersToday}</Text>
+            <Text style={styles.metricCardSub}>{summary.cancelledToday} cancelados</Text>
+          </View>
 
-            <TouchableOpacity
-              style={[styles.clientTabBtn, showMyOrders && styles.clientTabBtnActive]}
-              onPress={() => setShowMyOrders(true)}
-            >
-              <Text style={[styles.clientTabText, showMyOrders && styles.clientTabTextActive]}>
-                📋 Ver Mi Pedido y Estado ({clientOrders.length})
-              </Text>
+          <View style={styles.metricCard}>
+            <Text style={styles.metricCardTitle}>Pedidos activos</Text>
+            <Text style={styles.metricCardValue}>{summary.inProgressToday}</Text>
+            <Text style={styles.metricCardSub}>Pendientes, en preparación o listos</Text>
+          </View>
+
+          <View style={styles.metricCard}>
+            <Text style={styles.metricCardTitle}>Platillos disponibles</Text>
+            <Text style={styles.metricCardValue}>{summary.availableDishes}</Text>
+            <Text style={styles.metricCardSub}>de {summary.totalDishes} en el menú</Text>
+          </View>
+
+          <View style={styles.metricCard}>
+            <Text style={styles.metricCardTitle}>Ventas del día</Text>
+            <Text style={styles.metricCardValue}>{summary.saleToday}</Text>
+            <Text style={styles.metricCardSub}>Pedidos entregados</Text>
+          </View>
+        </View>
+
+        {/* Pedidos activos */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionCardTitle}>
+              Pedidos activos ({summary.inProgressToday})
+            </Text>
+            <TouchableOpacity onPress={() => navigation.navigate('Orders')}>
+              <Text style={styles.linkAction}>Ir a pedidos →</Text>
             </TouchableOpacity>
           </View>
 
-          {!showMyOrders ? (
-            <View>
-              <Text style={styles.sectionTitle}>Selecciona tus platillos:</Text>
-              {products.filter((p) => p.disponible !== false).length === 0 ? (
-                <Text style={styles.noOrdersText}>No hay menú disponible por el momento.</Text>
-              ) : (
-                products
-                  .filter((p) => p.disponible !== false)
-                  .map((item) => {
-                    const qty = selectedItems[item.id] || 0;
-                    return (
-                      <View key={item.id} style={styles.menuCard}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.productName}>{item.nombre}</Text>
-                          <Text style={styles.productPrice}>${item.precio.toFixed(2)}</Text>
-                        </View>
-                        <View style={styles.counterContainer}>
-                          <TouchableOpacity
-                            style={styles.counterBtn}
-                            onPress={() => handleQuantityChange(item.id, -1)}
-                          >
-                            <Text style={styles.counterBtnText}>-</Text>
-                          </TouchableOpacity>
-                          <Text style={styles.counterText}>{qty}</Text>
-                          <TouchableOpacity
-                            style={styles.counterBtn}
-                            onPress={() => handleQuantityChange(item.id, 1)}
-                          >
-                            <Text style={styles.counterBtnText}>+</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    );
-                  })
-              )}
-
-              {products.filter((p) => p.disponible !== false).length > 0 && (
-                <TouchableOpacity
-                  style={styles.sendOrderButton}
-                  onPress={handleSendClientOrder}
-                  disabled={savingOrder}
-                >
-                  {savingOrder ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text style={styles.sendOrderButtonText}>Enviar Pedido a Cocina</Text>
-                  )}
-                </TouchableOpacity>
-              )}
+          {summary.activeOrders.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyBoxText}>
+                No hay pedidos en curso en este momento.
+              </Text>
             </View>
           ) : (
-            <View>
-              <Text style={styles.sectionTitle}>Estado de tus Pedidos Recientes</Text>
-              {clientOrders.length === 0 ? (
-                <Text style={styles.noOrdersText}>Aún no has realizado ningún pedido.</Text>
-              ) : (
-                clientOrders.map((ord) => (
-                  <View key={ord.id} style={styles.orderStatusCard}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.orderItemsText}>{ord.items}</Text>
-                      <Text style={styles.orderTotalText}>Total: ${ord.total.toFixed(2)}</Text>
-                    </View>
-                    <View
-                      style={[
-                        styles.statusBadge,
-                        {
-                          backgroundColor:
-                            ord.status === 'Pendiente'
-                              ? '#fef3c7'
-                              : ord.status === 'En preparación'
-                              ? '#dbeafe'
-                              : '#dcfce7',
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.statusText,
-                          {
-                            color:
-                              ord.status === 'Pendiente'
-                                ? '#d97706'
-                                : ord.status === 'En preparación'
-                                ? '#2563eb'
-                                : '#16a34a',
-                          },
-                        ]}
-                      >
-                        {ord.status}
-                      </Text>
-                    </View>
-                  </View>
-                ))
-              )}
-            </View>
+            summary.activeOrders.map((ord) => (
+              <View key={ord.id} style={styles.activeOrderRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.activeOrderClient}>
+                    {ord.clientName} · {ord.status}
+                  </Text>
+                  <Text style={styles.activeOrderItems}>{ord.items}</Text>
+                </View>
+                <Text style={styles.activeOrderTotal}>${ord.total.toFixed(2)}</Text>
+              </View>
+            ))
           )}
         </View>
-      ) : (
-        /* VISTA PARA ADMIN / ENCARGADO */
-        <View>
-          {/* Tarjetas superiores de estado rápido de hoy */}
-          <View style={styles.cardsRow}>
-            <View style={styles.metricCard}>
-              <Text style={styles.metricCardTitle}>Pedidos de hoy</Text>
-              <Text style={styles.metricCardValue}>{todayOrdersCount}</Text>
+
+        {/* MÓDULO EXCLUSIVO ADMIN */}
+        {userRole === 'admin' ? (
+          <View style={{ paddingBottom: 24 }}>
+            <Text style={styles.adminEyebrow}>SOLO ADMIN · VENTAS E INGRESOS</Text>
+
+            <View style={styles.grid2}>
+              <View style={[styles.metricCard, styles.highlightCard]}>
+                <Text style={styles.metricCardTitle}>Ingresos de hoy</Text>
+                <Text style={styles.moneyValue}>${summary.revenueToday.toFixed(2)}</Text>
+                <Text style={styles.metricCardSub}>
+                  ${summary.pendingRevenueToday.toFixed(2)} por cobrar
+                </Text>
+              </View>
+
+              <View style={styles.metricCard}>
+                <Text style={styles.metricCardTitle}>Esta semana</Text>
+                <Text style={styles.moneyValue}>${summary.weekRevenue.toFixed(2)}</Text>
+                <Text style={styles.metricCardSub}>
+                  {summary.weekOrders} pedidos · desde el lunes
+                </Text>
+              </View>
+
+              <View style={styles.metricCard}>
+                <Text style={styles.metricCardTitle}>Este mes</Text>
+                <Text style={styles.moneyValue}>${summary.monthRevenue.toFixed(2)}</Text>
+                <Text style={styles.metricCardSub}>
+                  {summary.monthOrders} pedidos entregados
+                </Text>
+              </View>
+
+              <View style={styles.metricCard}>
+                <Text style={styles.metricCardTitle}>Ticket promedio</Text>
+                <Text style={styles.moneyValue}>
+                  ${summary.averageTicketMonth.toFixed(2)}
+                </Text>
+                <Text style={styles.metricCardSub}>Por pedido entregado este mes</Text>
+              </View>
             </View>
 
-            <View style={styles.metricCard}>
-              <Text style={styles.metricCardTitle}>Platillos disponibles</Text>
-              <Text
-                style={[
-                  styles.metricCardValue,
-                  availableProductsCount === 0 && { fontSize: 13, color: '#dc2626', marginTop: 4 },
-                ]}
-              >
-                {availableProductsCount > 0 ? availableProductsCount : 'No hay menú disponible'}
+            {/* Ingresos de los últimos 7 días */}
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionCardTitle}>
+                  Ingresos de los últimos 7 días
+                </Text>
+                <Text style={styles.totalPeriodText}>
+                  Total: ${summary.total7DaysRevenue.toFixed(2)}
+                </Text>
+              </View>
+
+              <TouchableOpacity onPress={() => setShowSevenDaysTable((prev) => !prev)}>
+                <Text style={styles.toggleTableText}>
+                  {showSevenDaysTable ? '▾ Ver como tabla' : '▸ Ver como tabla'}
+                </Text>
+              </TouchableOpacity>
+
+              {showSevenDaysTable && (
+                <View style={{ marginTop: 10 }}>
+                  <View style={styles.tableHead}>
+                    <Text style={[styles.th, { flex: 2 }]}>DÍA</Text>
+                    <Text style={[styles.th, { flex: 1, textAlign: 'right' }]}>
+                      PEDIDOS
+                    </Text>
+                    <Text style={[styles.th, { flex: 1, textAlign: 'right' }]}>
+                      INGRESOS
+                    </Text>
+                  </View>
+                  {summary.last7DaysList.map((row) => (
+                    <View key={row.dateKey} style={styles.tableRow}>
+                      <Text style={[styles.td, { flex: 2 }]}>{row.label}</Text>
+                      <Text style={[styles.td, { flex: 1, textAlign: 'right' }]}>
+                        {row.orders}
+                      </Text>
+                      <Text style={[styles.td, { flex: 1, textAlign: 'right' }]}>
+                        ${row.revenue.toFixed(2)}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+
+            {/* Platillos más vendidos (7 días) */}
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionCardTitle}>
+                Platillos más vendidos (7 días)
               </Text>
-            </View>
-
-            <View style={styles.metricCard}>
-              <Text style={styles.metricCardTitle}>Ventas del día</Text>
-              <Text style={styles.metricCardValue}>${todaySalesSum.toFixed(2)}</Text>
-            </View>
-          </View>
-
-          {/* MÓDULO EXCLUSIVO ADMIN: Reportes por Día / Semana y Top Platillos */}
-          {userRole === 'admin' ? (
-            <View style={styles.analyticsCard}>
-              <View style={styles.analyticsHeader}>
-                <Text style={styles.analyticsTitle}>Reporte de Ventas y Demanda</Text>
-                <View style={styles.periodToggleRow}>
-                  <TouchableOpacity
-                    style={[
-                      styles.periodBtn,
-                      reportPeriod === 'today' && styles.periodBtnActive,
-                    ]}
-                    onPress={() => setReportPeriod('today')}
-                  >
-                    <Text
-                      style={[
-                        styles.periodBtnText,
-                        reportPeriod === 'today' && styles.periodBtnTextActive,
-                      ]}
-                    >
-                      Hoy
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.periodBtn,
-                      reportPeriod === 'week' && styles.periodBtnActive,
-                    ]}
-                    onPress={() => setReportPeriod('week')}
-                  >
-                    <Text
-                      style={[
-                        styles.periodBtnText,
-                        reportPeriod === 'week' && styles.periodBtnTextActive,
-                      ]}
-                    >
-                      Últimos 7 días
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Resumen del período seleccionado */}
-              <View style={styles.summaryStrip}>
-                <View style={styles.summaryItem}>
-                  <Text style={styles.summaryLabel}>Ingresos ({reportPeriod === 'today' ? 'Hoy' : '7 días'})</Text>
-                  <Text style={styles.summaryNumber}>${periodSales.toFixed(2)}</Text>
-                </View>
-                <View style={styles.summaryDivider} />
-                <View style={styles.summaryItem}>
-                  <Text style={styles.summaryLabel}>Órdenes realizadas</Text>
-                  <Text style={styles.summaryNumber}>{periodOrdersCount}</Text>
-                </View>
-              </View>
-
-              {/* Ranking de lo más vendido */}
-              <Text style={styles.topDishesSubtitle}>Platillos más vendidos</Text>
-              {topDishes.length === 0 ? (
+              {summary.topDishes.length === 0 ? (
                 <Text style={styles.emptyReportText}>
-                  No hay ventas registradas en este período.
+                  Aún no hay ventas registradas en este periodo.
                 </Text>
               ) : (
-                topDishes.map((dish, index) => {
+                summary.topDishes.map((dish, index) => {
                   const barWidthPercent = Math.round((dish.quantity / maxDishQty) * 100);
                   return (
                     <View key={dish.name} style={styles.dishRankRow}>
@@ -577,22 +602,45 @@ export default function HomeScreen({ navigation }: any) {
                 })
               )}
             </View>
-          ) : (
-            <View style={styles.infoBox}>
-              <Text style={styles.infoBoxText}>
-                Como encargado, puedes gestionar la disponibilidad del menú y el control de pedidos activos.
+
+            {/* Pedidos de hoy por estado */}
+            <View style={styles.sectionCard}>
+              <Text style={styles.sectionCardTitle}>
+                Pedidos de hoy por estado ({summary.ordersToday})
               </Text>
+              {Object.keys(summary.statusCounts).length === 0 ? (
+                <Text style={styles.emptyReportText}>Aún no hay pedidos hoy.</Text>
+              ) : (
+                Object.entries(summary.statusCounts).map(([statusName, count]) => (
+                  <View key={statusName} style={styles.statusSummaryRow}>
+                    <Text style={styles.td}>{statusName}</Text>
+                    <Text style={styles.tdBold}>{count}</Text>
+                  </View>
+                ))
+              )}
             </View>
-          )}
-        </View>
-      )}
+          </View>
+        ) : (
+          <View style={styles.infoBox}>
+            <Text style={styles.infoBoxText}>
+              Como encargado, puedes gestionar la disponibilidad del menú y el control de
+              pedidos activos.
+            </Text>
+          </View>
+        )}
+      </View>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FDFBF7', padding: 15 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FDFBF7' },
+  container: { flex: 1, backgroundColor: '#f5ede0', padding: 14 },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f5ede0',
+  },
   navbar: {
     backgroundColor: '#5c1d24',
     padding: 12,
@@ -600,133 +648,193 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
     flexWrap: 'wrap',
     gap: 10,
   },
   navBrand: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   navActions: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   navTab: { paddingHorizontal: 8, paddingVertical: 4 },
-  navTabActive: { backgroundColor: '#7a2831', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
+  navTabActive: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
   navTabText: { color: '#ffd700', fontWeight: '600', fontSize: 13 },
   navTabTextActive: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
-  userInfoBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#4a154b', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  userBadgeName: { color: '#fff', fontSize: 12, fontWeight: '500' },
-  roleBadgeTag: { backgroundColor: '#ffd700', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 },
-  roleBadgeText: { color: '#5c1d24', fontSize: 9, fontWeight: 'bold' },
-  logoutButton: { backgroundColor: '#d97706', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
-  logoutText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  welcomeSection: { marginBottom: 15 },
-  welcomeTitle: { fontSize: 22, fontWeight: 'bold', color: '#5c1d24' },
-  roleSubtitle: { fontSize: 14, color: '#666', marginTop: 2 },
-  cardsRow: { flexDirection: 'row', gap: 12, marginBottom: 20, flexWrap: 'wrap' },
-  metricCard: {
-    flex: 1,
-    minWidth: 100,
-    backgroundColor: '#fff',
-    padding: 18,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#e5e0d8',
-    elevation: 2,
+  userInfoBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#47151b',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
-  metricCardTitle: { fontSize: 13, color: '#666', marginBottom: 8, fontWeight: '600' },
-  metricCardValue: { fontSize: 22, fontWeight: 'bold', color: '#5c1d24' },
+  userBadgeName: { color: '#fff', fontSize: 12, fontWeight: '500' },
+  roleBadgeTag: {
+    backgroundColor: '#ffd700',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  roleBadgeText: { color: '#5c1d24', fontSize: 9, fontWeight: 'bold' },
+  logoutButton: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  logoutText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+  welcomeHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 14,
+    gap: 10,
+  },
+  welcomeTitle: { fontSize: 22, fontWeight: 'bold', color: '#4a151b' },
+  roleSubtitle: { fontSize: 13, color: '#6b5c54', marginTop: 2 },
+  refreshChip: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ddd0be',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  refreshChipText: { color: '#4a151b', fontSize: 12, fontWeight: '600' },
+  grid2: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 14,
+  },
+  metricCard: {
+    width: '48.4%',
+    backgroundColor: '#fff',
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e8dccb',
+    elevation: 1,
+  },
+  highlightCard: {
+    backgroundColor: '#f7ead9',
+    borderColor: '#d9b994',
+  },
+  metricCardTitle: {
+    fontSize: 13,
+    color: '#5c4b43',
+    marginBottom: 6,
+    fontWeight: '600',
+  },
+  metricCardValue: { fontSize: 24, fontWeight: '800', color: '#4a151b' },
+  moneyValue: { fontSize: 21, fontWeight: '800', color: '#4a151b' },
+  metricCardSub: { fontSize: 11, color: '#7a6a62', marginTop: 4 },
+  sectionCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#e8dccb',
+    marginBottom: 14,
+    elevation: 1,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sectionCardTitle: { fontSize: 16, fontWeight: '700', color: '#4a151b' },
+  linkAction: { fontSize: 13, fontWeight: '700', color: '#5c1d24' },
+  emptyBox: {
+    backgroundColor: '#faf4eb',
+    borderRadius: 8,
+    padding: 14,
+    alignItems: 'center',
+  },
+  emptyBoxText: { color: '#6b5c54', fontSize: 13 },
+  activeOrderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f2e8da',
+  },
+  activeOrderClient: { fontSize: 13, fontWeight: '700', color: '#4a151b' },
+  activeOrderItems: { fontSize: 12, color: '#6b5c54' },
+  activeOrderTotal: { fontSize: 14, fontWeight: '700', color: '#4a151b' },
+  adminEyebrow: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#8a5a36',
+    letterSpacing: 0.6,
+    marginBottom: 8,
+    marginTop: 2,
+  },
+  totalPeriodText: { fontSize: 13, fontWeight: '700', color: '#6b5c54' },
+  toggleTableText: { fontSize: 12, fontWeight: '600', color: '#6b5c54' },
+  tableHead: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e6d9c8',
+    paddingBottom: 6,
+    marginBottom: 4,
+  },
+  th: { fontSize: 11, fontWeight: '700', color: '#7a6a62' },
+  tableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3ece2',
+    paddingVertical: 7,
+  },
+  td: { fontSize: 13, color: '#3f322c' },
+  tdBold: { fontSize: 13, fontWeight: '700', color: '#4a151b' },
   infoBox: {
     backgroundColor: '#f5efe6',
     borderWidth: 1,
     borderColor: '#e5dcce',
     padding: 16,
     borderRadius: 10,
+    marginBottom: 24,
   },
-  infoBoxText: { color: '#5c1d24', fontSize: 13, textAlign: 'center', fontWeight: '500' },
-
-  // Estilos Analítica Admin
-  analyticsCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#e5e0d8',
-    marginBottom: 30,
-    elevation: 2,
+  infoBoxText: {
+    color: '#5c1d24',
+    fontSize: 13,
+    textAlign: 'center',
+    fontWeight: '500',
   },
-  analyticsHeader: {
+  emptyReportText: {
+    textAlign: 'center',
+    color: '#888',
+    fontSize: 13,
+    paddingVertical: 12,
+  },
+  dishRankRow: { marginBottom: 12 },
+  dishRankHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 10,
-    marginBottom: 14,
+    marginBottom: 4,
   },
-  analyticsTitle: { fontSize: 16, fontWeight: 'bold', color: '#5c1d24' },
-  periodToggleRow: { flexDirection: 'row', backgroundColor: '#f3eee6', borderRadius: 8, padding: 3 },
-  periodBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  periodBtnActive: { backgroundColor: '#5c1d24' },
-  periodBtnText: { fontSize: 12, fontWeight: '600', color: '#5c1d24' },
-  periodBtnTextActive: { color: '#fff' },
-  summaryStrip: {
-    flexDirection: 'row',
-    backgroundColor: '#FDFBF7',
-    borderRadius: 8,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#eee',
-    marginBottom: 16,
-  },
-  summaryItem: { flex: 1, alignItems: 'center' },
-  summaryDivider: { width: 1, backgroundColor: '#e5e0d8' },
-  summaryLabel: { fontSize: 12, color: '#666', marginBottom: 4 },
-  summaryNumber: { fontSize: 18, fontWeight: 'bold', color: '#16a34a' },
-  topDishesSubtitle: { fontSize: 14, fontWeight: 'bold', color: '#333', marginBottom: 12 },
-  emptyReportText: { textAlign: 'center', color: '#888', fontSize: 13, paddingVertical: 15 },
-  dishRankRow: { marginBottom: 12 },
-  dishRankHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
   dishRankName: { fontSize: 13, fontWeight: '600', color: '#333' },
   dishRankQty: { fontSize: 13, fontWeight: 'bold', color: '#5c1d24' },
-  barBackground: { height: 8, backgroundColor: '#f0ebe1', borderRadius: 4, overflow: 'hidden' },
+  barBackground: {
+    height: 8,
+    backgroundColor: '#f0ebe1',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
   barFill: { height: '100%', backgroundColor: '#d97706', borderRadius: 4 },
-
-  // Estilos Cliente
-  clientTabRow: { flexDirection: 'row', gap: 10, marginBottom: 15 },
-  clientTabBtn: { flex: 1, padding: 10, backgroundColor: '#e5e0d8', borderRadius: 8, alignItems: 'center' },
-  clientTabBtnActive: { backgroundColor: '#5c1d24' },
-  clientTabText: { fontSize: 13, fontWeight: 'bold', color: '#5c1d24' },
-  clientTabTextActive: { color: '#fff' },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#5c1d24', marginBottom: 10 },
-  menuCard: {
-    backgroundColor: '#fff',
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#eee',
+  statusSummaryRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f5efe6',
   },
-  productName: { fontSize: 15, fontWeight: 'bold', color: '#333' },
-  productPrice: { fontSize: 13, color: '#5c1d24', fontWeight: 'bold', marginTop: 2 },
-  counterContainer: { flexDirection: 'row', alignItems: 'center' },
-  counterBtn: { width: 30, height: 30, backgroundColor: '#5c1d24', borderRadius: 6, justifyContent: 'center', alignItems: 'center' },
-  counterBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  counterText: { marginHorizontal: 12, fontSize: 15, fontWeight: 'bold', color: '#333' },
-  sendOrderButton: { backgroundColor: '#16a34a', padding: 14, borderRadius: 8, alignItems: 'center', marginTop: 15, marginBottom: 30 },
-  sendOrderButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
-  noOrdersText: { textAlign: 'center', color: '#666', marginTop: 20, fontSize: 14 },
-  orderStatusCard: {
-    backgroundColor: '#fff',
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#eee',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  orderItemsText: { fontSize: 14, fontWeight: '500', color: '#333', marginBottom: 4 },
-  orderTotalText: { fontSize: 13, fontWeight: 'bold', color: '#5c1d24' },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
-  statusText: { fontSize: 12, fontWeight: 'bold' },
 });

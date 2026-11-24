@@ -1,302 +1,1223 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
   TextInput,
   TouchableOpacity,
-  FlatList,
+  ScrollView,
   StyleSheet,
   ActivityIndicator,
-  Platform,
   Alert,
-  ScrollView,
+  Platform,
+  RefreshControl,
+  Modal,
 } from 'react-native';
 import {
   collection,
-  addDoc,
   onSnapshot,
+  addDoc,
   updateDoc,
   doc,
-  query,
-  orderBy,
   serverTimestamp,
 } from 'firebase/firestore';
-import { db } from '../services/firebaseConfig';
+import { signOut } from 'firebase/auth';
+import { auth, db } from '../services/firebaseConfig';
 
-interface MenuItem {
+const DELIVERY_TYPES = ['Comer en el local', 'Para llevar', 'A domicilio'] as const;
+type DeliveryType = (typeof DELIVERY_TYPES)[number];
+
+const PAYMENT_METHODS = ['Efectivo', 'Tarjeta'] as const;
+type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+
+const ORDER_STATUSES = [
+  'Pendiente',
+  'En preparación',
+  'Listo para entregar',
+  'Entregado',
+  'Cancelado',
+] as const;
+type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+type DateFilterType = 'today' | 'yesterday' | 'last7days' | 'all' | 'custom';
+
+const MONTHS_ES = [
+  'Enero',
+  'Febrero',
+  'Marzo',
+  'Abril',
+  'Mayo',
+  'Junio',
+  'Julio',
+  'Agosto',
+  'Septiembre',
+  'Octubre',
+  'Noviembre',
+  'Diciembre',
+];
+
+interface Product {
   id: string;
-  name: string;
-  price: number;
+  nombre: string;
+  precio: number;
+  disponible: boolean;
 }
 
-interface OrderItem {
+interface OrderRecord {
   id: string;
-  table: string;
+  clientName: string;
+  clientPhone?: string;
+  notes?: string;
+  deliveryType: string;
+  paymentMethod: string;
   items: string;
   total: number;
-  status: 'Pendiente' | 'En preparación' | 'Entregado';
+  status: OrderStatus;
+  createdAtDate: Date;
+}
+
+function toYMD(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getDaysInMonth(year: number, monthIndex0: number): number {
+  return new Date(year, monthIndex0 + 1, 0).getDate();
+}
+
+function getFirstWeekdayOfMonth(year: number, monthIndex0: number): number {
+  return new Date(year, monthIndex0, 1).getDay();
+}
+
+function normalizeOrderStatus(raw: unknown): OrderStatus {
+  const val = String(raw || 'Pendiente').trim().toLowerCase();
+  if (val === 'en preparación' || val === 'en preparacion') return 'En preparación';
+  if (val === 'listo para entregar' || val === 'listo') return 'Listo para entregar';
+  if (val === 'entregado' || val === 'completado') return 'Entregado';
+  if (val === 'cancelado' || val === 'cancelada') return 'Cancelado';
+  return 'Pendiente';
+}
+
+function getStatusBadgeStyle(status: OrderStatus) {
+  switch (status) {
+    case 'Pendiente':
+      return { bg: '#fef3c7', text: '#b45309' };
+    case 'En preparación':
+      return { bg: '#dbeafe', text: '#1d4ed8' };
+    case 'Listo para entregar':
+      return { bg: '#ede9fe', text: '#6d28d9' };
+    case 'Entregado':
+      return { bg: '#dcfce7', text: '#15803d' };
+    case 'Cancelado':
+      return { bg: '#fee2e2', text: '#dc2626' };
+  }
 }
 
 export default function OrdersScreen({ navigation }: any) {
-  const [orders, setOrders] = useState<OrderItem[]>([]);
-  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [loadingMenu, setLoadingMenu] = useState(true);
+  const [loadingOrders, setLoadingOrders] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // Campos para el nuevo pedido
-  const [table, setTable] = useState('');
-  const [selectedItems, setSelectedItems] = useState<{ [key: string]: number }>({}); // idPlatillo -> cantidad
+  const [clientName, setClientName] = useState('');
+  const [clientPhone, setClientPhone] = useState('');
+  const [notes, setNotes] = useState('');
+  const [deliveryType, setDeliveryType] = useState<DeliveryType>('Comer en el local');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Efectivo');
+  const [quantities, setQuantities] = useState<{ [productId: string]: number }>({});
 
-  const showNotification = (title: string, message: string) => {
+  const [dateFilter, setDateFilter] = useState<DateFilterType>('today');
+  const [customDateStr, setCustomDateStr] = useState<string>(() => toYMD(new Date()));
+  const [statusFilter, setStatusFilter] = useState<'Todos' | OrderStatus>('Todos');
+
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const initialDate = useMemo(() => {
+    const parts = customDateStr.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(Number.isNaN)) {
+      return new Date(parts[0], parts[1] - 1, parts[2]);
+    }
+    return new Date();
+  }, [customDateStr]);
+
+  const [calYear, setCalYear] = useState<number>(initialDate.getFullYear());
+  const [calMonth, setCalMonth] = useState<number>(initialDate.getMonth());
+
+  const notify = (title: string, msg: string) => {
     if (Platform.OS === 'web') {
-      window.alert(`${title}: ${message}`);
+      window.alert(`${title}: ${msg}`);
     } else {
-      Alert.alert(title, message);
+      Alert.alert(title, msg);
     }
   };
 
-  // 1. Cargar el catálogo desde la colección 'productos' en Firestore
   useEffect(() => {
-    const unsubscribeMenu = onSnapshot(collection(db, 'productos'), (snapshot) => {
-      const list: MenuItem[] = snapshot.docs.map((docSnap) => {
-        const data = docSnap.data();
-        return {
-          id: docSnap.id,
-          name: data.nombre || data.name || 'Platillo sin nombre',
-          price: Number(data.precio || data.price || 0),
-        };
-      });
-      setMenuItems(list);
-    }, (error) => {
-      console.log('Error leyendo productos:', error);
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      setIsAdmin(false);
+      return;
+    }
+
+    const unsubUser = onSnapshot(collection(db, 'users'), (snap) => {
+      const found = snap.docs.find(
+        (d) => d.id === currentUser.uid || d.data().uid === currentUser.uid
+      );
+      const roleVal = String(found?.data()?.role || '').toLowerCase();
+      setIsAdmin(roleVal === 'admin');
     });
 
-    // 2. Cargar los pedidos activos en tiempo real
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
-    const unsubscribeOrders = onSnapshot(
-      q,
-      (snapshot) => {
-        const list: OrderItem[] = snapshot.docs.map((docSnap) => ({
-          id: docSnap.id,
-          table: docSnap.data().table || 'Sin mesa',
-          items: docSnap.data().items || '',
-          total: docSnap.data().total || 0,
-          status: docSnap.data().status || 'Pendiente',
-        }));
-        setOrders(list);
-        setLoading(false);
+    return () => unsubUser();
+  }, []);
+
+  useEffect(() => {
+    const unsubProducts = onSnapshot(
+      collection(db, 'productos'),
+      (snap) => {
+        const list: Product[] = snap.docs.map((d) => {
+          const raw = d.data();
+          const available =
+            typeof raw.disponible === 'boolean'
+              ? raw.disponible
+              : typeof raw.available === 'boolean'
+              ? raw.available
+              : true;
+
+          return {
+            id: d.id,
+            nombre: raw.nombre || raw.name || 'Sin nombre',
+            precio: Number(raw.precio ?? raw.price ?? 0),
+            disponible: available,
+          };
+        });
+        setProducts(list);
+        setLoadingMenu(false);
       },
-      (error) => {
-        console.error('Error al cargar pedidos:', error);
-        setLoading(false);
+      (err) => {
+        console.error('Error al cargar productos en Pedidos:', err);
+        setLoadingMenu(false);
+      }
+    );
+
+    const unsubOrders = onSnapshot(
+      collection(db, 'orders'),
+      (snap) => {
+        const list: OrderRecord[] = snap.docs.map((d) => {
+          const raw = d.data();
+          const createdAt = raw.createdAt?.toDate
+            ? raw.createdAt.toDate()
+            : raw.createdAt
+            ? new Date(raw.createdAt)
+            : new Date();
+
+          return {
+            id: d.id,
+            clientName: raw.clientName || 'Cliente',
+            clientPhone: raw.clientPhone || '',
+            notes: raw.notes || '',
+            deliveryType: raw.deliveryType || raw.table || 'Comer en el local',
+            paymentMethod: raw.paymentMethod || 'Efectivo',
+            items: raw.items || '',
+            total: Number(raw.total ?? 0),
+            status: normalizeOrderStatus(raw.status),
+            createdAtDate: createdAt,
+          };
+        });
+
+        list.sort((a, b) => b.createdAtDate.getTime() - a.createdAtDate.getTime());
+        setOrders(list);
+        setLoadingOrders(false);
+      },
+      (err) => {
+        console.error('Error al cargar pedidos:', err);
+        setLoadingOrders(false);
       }
     );
 
     return () => {
-      unsubscribeMenu();
-      unsubscribeOrders();
+      unsubProducts();
+      unsubOrders();
     };
   }, []);
 
-  // Manejar cantidad de un platillo en el pedido
-  const handleQuantityChange = (id: string, delta: number) => {
-    setSelectedItems((prev) => {
-      const current = prev[id] || 0;
-      const updated = current + delta;
-      if (updated <= 0) {
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      navigation.replace('Login');
+    } catch (err) {
+      console.error('Error al cerrar sesión:', err);
+      notify('Error', 'No se pudo cerrar sesión.');
+    }
+  };
+
+  const openCalendarModal = () => {
+    const parts = customDateStr.split('-').map(Number);
+    if (parts.length === 3 && !parts.some(Number.isNaN)) {
+      setCalYear(parts[0]);
+      setCalMonth(parts[1] - 1);
+    } else {
+      const now = new Date();
+      setCalYear(now.getFullYear());
+      setCalMonth(now.getMonth());
+    }
+    setCalendarVisible(true);
+  };
+
+  const handleSelectCalendarDay = (day: number) => {
+    const picked = new Date(calYear, calMonth, day);
+    setCustomDateStr(toYMD(picked));
+    setDateFilter('custom');
+    setCalendarVisible(false);
+  };
+
+  const handleShiftMonth = (delta: number) => {
+    const next = new Date(calYear, calMonth + delta, 1);
+    setCalYear(next.getFullYear());
+    setCalMonth(next.getMonth());
+  };
+
+  const handleChangeQty = (product: Product, delta: number) => {
+    if (!product.disponible && delta > 0) return;
+
+    setQuantities((prev) => {
+      const current = prev[product.id] || 0;
+      const next = current + delta;
+      if (next <= 0) {
         const copy = { ...prev };
-        delete copy[id];
+        delete copy[product.id];
         return copy;
       }
-      return { ...prev, [id]: updated };
+      return { ...prev, [product.id]: next };
     });
   };
 
-  // Calcular total y texto descriptivo del pedido
-  const calculateOrderDetails = () => {
-    let summaryText = '';
-    let totalPrice = 0;
+  const { itemsSummary, orderTotal } = useMemo(() => {
+    const parts: string[] = [];
+    let sum = 0;
 
-    Object.entries(selectedItems).forEach(([id, qty]) => {
-      const menuItem = menuItems.find((m) => m.id === id);
-      if (menuItem) {
-        summaryText += `${qty}x ${menuItem.name}, `;
-        totalPrice += menuItem.price * qty;
+    products.forEach((p) => {
+      const qty = quantities[p.id] || 0;
+      if (qty > 0) {
+        parts.push(`${qty}x ${p.nombre}`);
+        sum += qty * p.precio;
       }
     });
 
-    if (summaryText.endsWith(', ')) {
-      summaryText = summaryText.slice(0, -2);
-    }
+    return {
+      itemsSummary: parts.join(', '),
+      orderTotal: sum,
+    };
+  }, [products, quantities]);
 
-    return { summaryText, totalPrice };
-  };
-
-  // Guardar pedido en Firestore
-  const handleCreateOrder = async () => {
-    if (!table.trim()) {
-      showNotification('Mesa requerida', 'Por favor ingresa el número de mesa o si es para llevar.');
+  const handleRegisterOrder = async () => {
+    if (!itemsSummary || orderTotal <= 0) {
+      notify(
+        'Sin platillos',
+        'Selecciona al menos un platillo disponible para registrar el pedido.'
+      );
       return;
     }
 
-    const { summaryText, totalPrice } = calculateOrderDetails();
-
-    if (!summaryText) {
-      showNotification('Menú vacío', 'Selecciona al menos un platillo del menú para ordenar.');
-      return;
-    }
+    const finalClientName = clientName.trim() || 'Cliente mostrador';
+    const currentUser = auth.currentUser;
 
     try {
       setSaving(true);
       await addDoc(collection(db, 'orders'), {
-        table: table.trim(),
-        items: summaryText,
-        total: totalPrice,
-        status: 'Pendiente',
+        clientName: finalClientName,
+        clientPhone: clientPhone.trim(),
+        clientEmail: currentUser?.email || '',
+        notes: notes.trim(),
+        deliveryType,
+        table: deliveryType,
+        paymentMethod,
+        items: itemsSummary,
+        total: Number(orderTotal.toFixed(2)),
+        status: 'Pendiente' as OrderStatus,
         createdAt: serverTimestamp(),
       });
-      setTable('');
-      setSelectedItems({});
-    } catch (error) {
-      console.error('Error al guardar pedido:', error);
-      showNotification('Error', 'No se pudo registrar el pedido.');
+
+      setClientName('');
+      setClientPhone('');
+      setNotes('');
+      setDeliveryType('Comer en el local');
+      setPaymentMethod('Efectivo');
+      setQuantities({});
+      notify('Pedido registrado', 'El pedido se guardó con estado Pendiente.');
+    } catch (err) {
+      console.error('Error al registrar pedido:', err);
+      notify('Error', 'No se pudo registrar el pedido.');
     } finally {
       setSaving(false);
     }
   };
 
-  // Cambiar estado del pedido al tocarlo
-  const handleCycleStatus = async (order: OrderItem) => {
-    const nextStatusMap: Record<OrderItem['status'], OrderItem['status']> = {
-      Pendiente: 'En preparación',
-      'En preparación': 'Entregado',
-      Entregado: 'Pendiente',
-    };
-    const nextStatus = nextStatusMap[order.status] || 'Pendiente';
-
+  const handleUpdateOrderStatus = async (orderId: string, nextStatus: OrderStatus) => {
     try {
-      await updateDoc(doc(db, 'orders', order.id), { status: nextStatus });
-    } catch (error) {
-      console.error('Error al actualizar estado:', error);
+      await updateDoc(doc(db, 'orders', orderId), {
+        status: nextStatus,
+      });
+    } catch (err) {
+      console.error('Error al actualizar estado del pedido:', err);
+      notify('Error', 'No se pudo actualizar el estado del pedido.');
     }
   };
 
-  const getStatusColor = (status: OrderItem['status']) => {
-    switch (status) {
-      case 'Pendiente': return '#d97706';
-      case 'En preparación': return '#2563eb';
-      case 'Entregado': return '#16a34a';
-      default: return '#666';
-    }
+  const dateFilteredOrders = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayKey = toYMD(todayStart);
+
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(todayStart.getDate() - 1);
+    const yesterdayKey = toYMD(yesterdayStart);
+
+    const sevenDaysStart = new Date(todayStart);
+    sevenDaysStart.setDate(todayStart.getDate() - 6);
+
+    return orders.filter((ord) => {
+      const ordDayStart = new Date(
+        ord.createdAtDate.getFullYear(),
+        ord.createdAtDate.getMonth(),
+        ord.createdAtDate.getDate()
+      );
+      const ordKey = toYMD(ordDayStart);
+
+      if (dateFilter === 'today') return ordKey === todayKey;
+      if (dateFilter === 'yesterday') return ordKey === yesterdayKey;
+      if (dateFilter === 'last7days') {
+        return ordDayStart >= sevenDaysStart && ordDayStart <= todayStart;
+      }
+      if (dateFilter === 'custom') return ordKey === customDateStr.trim();
+      return true;
+    });
+  }, [orders, dateFilter, customDateStr]);
+
+  const statusCounts = useMemo(() => {
+    const counts: Record<OrderStatus, number> = {
+      Pendiente: 0,
+      'En preparación': 0,
+      'Listo para entregar': 0,
+      Entregado: 0,
+      Cancelado: 0,
+    };
+    dateFilteredOrders.forEach((o) => {
+      counts[o.status] = (counts[o.status] || 0) + 1;
+    });
+    return counts;
+  }, [dateFilteredOrders]);
+
+  const visibleOrders = useMemo(() => {
+    if (statusFilter === 'Todos') return dateFilteredOrders;
+    return dateFilteredOrders.filter((o) => o.status === statusFilter);
+  }, [dateFilteredOrders, statusFilter]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 350);
   };
 
   return (
-    <ScrollView style={styles.container}>
-      <Text style={styles.title}>Control de Pedidos</Text>
-      <Text style={styles.subtitle}>Selección de Menú y Comandas - Don Bigotes</Text>
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.topNav}>
+        <View style={styles.topNavHeader}>
+          <Text style={styles.navBrand}>Don Bigotes</Text>
+          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+            <Text style={styles.logoutBtnText}>Salir</Text>
+          </TouchableOpacity>
+        </View>
 
-      <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
-        <Text style={styles.backButtonText}>← Volver a Gestión de Menú</Text>
-      </TouchableOpacity>
-
-      {/* Formulario de selección interactiva */}
-      <View style={styles.formCard}>
-        <Text style={styles.formTitle}>Nuevo Pedido por Selección</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Mesa / Cliente (Ej. Mesa 2)"
-          value={table}
-          onChangeText={setTable}
-        />
-
-        <Text style={styles.labelMenu}>Selecciona los platillos del Menú:</Text>
-        {menuItems.map((item) => {
-          const qty = selectedItems[item.id] || 0;
-          return (
-            <View key={item.id} style={styles.menuRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.menuName}>{item.name}</Text>
-                <Text style={styles.menuPrice}>${item.price.toFixed(2)}</Text>
-              </View>
-              <View style={styles.counterContainer}>
-                <TouchableOpacity
-                  style={styles.counterBtn}
-                  onPress={() => handleQuantityChange(item.id, -1)}
-                >
-                  <Text style={styles.counterBtnText}>-</Text>
-                </TouchableOpacity>
-                <Text style={styles.counterText}>{qty}</Text>
-                <TouchableOpacity
-                  style={styles.counterBtn}
-                  onPress={() => handleQuantityChange(item.id, 1)}
-                >
-                  <Text style={styles.counterBtnText}>+</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        })}
-
-        <TouchableOpacity style={styles.addButton} onPress={handleCreateOrder} disabled={saving}>
-          {saving ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.addButtonText}>Confirmar y Enviar Pedido</Text>
+        <View style={styles.navLinks}>
+          <TouchableOpacity onPress={() => navigation.navigate('Home')}>
+            <Text style={styles.navLinkYellow}>Dashboard</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate('Menu')}>
+            <Text style={styles.navLinkYellow}>Menú</Text>
+          </TouchableOpacity>
+          <View style={styles.navActivePill}>
+            <Text style={styles.navActiveText}>Pedidos</Text>
+          </View>
+          {isAdmin && (
+            <TouchableOpacity
+              onPress={() => navigation.navigate('Register', { isAdminCreating: true })}
+            >
+              <Text style={styles.navLinkYellow}>Nuevo usuario</Text>
+            </TouchableOpacity>
           )}
+        </View>
+      </View>
+
+      <View style={styles.headerRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.pageTitle}>Pedidos - Don Bigotes</Text>
+          <Text style={styles.pageSubtitle}>
+            Registro de comandas y seguimiento de su estado
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh}>
+          <Text style={styles.refreshBtnText}>Actualizar</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.sectionTitle}>Comandas Activas (Toca para cambiar estado)</Text>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Nuevo pedido</Text>
 
-      {loading ? (
-        <ActivityIndicator size="large" color="#5c1d24" style={{ marginTop: 20 }} />
-      ) : (
-        orders.map((item) => (
+        <Text style={styles.fieldLabel}>Cliente</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Doña Marta (mesa 3)"
+          placeholderTextColor="#9ca3af"
+          value={clientName}
+          onChangeText={setClientName}
+        />
+
+        <Text style={styles.fieldLabel}>Teléfono (opcional)</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="7012-3456"
+          placeholderTextColor="#9ca3af"
+          value={clientPhone}
+          onChangeText={setClientPhone}
+          keyboardType="phone-pad"
+        />
+
+        <Text style={styles.fieldLabel}>Notas (opcional)</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Sin cebolla, cambio de $20..."
+          placeholderTextColor="#9ca3af"
+          value={notes}
+          onChangeText={setNotes}
+        />
+
+        <Text style={styles.fieldLabel}>Tipo de entrega</Text>
+        <View style={styles.chipsRow}>
+          {DELIVERY_TYPES.map((type) => {
+            const active = deliveryType === type;
+            return (
+              <TouchableOpacity
+                key={type}
+                style={[styles.choiceChip, active && styles.choiceChipActive]}
+                onPress={() => setDeliveryType(type)}
+              >
+                <Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>
+                  {type}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        <Text style={styles.fieldLabel}>Método de pago</Text>
+        <View style={styles.chipsRow}>
+          {PAYMENT_METHODS.map((method) => {
+            const active = paymentMethod === method;
+            return (
+              <TouchableOpacity
+                key={method}
+                style={[styles.choiceChip, active && styles.choiceChipActive]}
+                onPress={() => setPaymentMethod(method)}
+              >
+                <Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>
+                  {method}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        <Text style={[styles.fieldLabel, { marginTop: 14 }]}>Platillos</Text>
+        {loadingMenu ? (
+          <ActivityIndicator size="small" color="#5c1d24" style={{ marginVertical: 12 }} />
+        ) : (
+          <View style={styles.dishesList}>
+            {products.map((prod) => {
+              const qty = quantities[prod.id] || 0;
+              const isSoldOut = !prod.disponible;
+
+              return (
+                <View
+                  key={prod.id}
+                  style={[styles.dishRowCard, isSoldOut && styles.dishRowSoldOut]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.dishRowName,
+                        isSoldOut && styles.soldOutStrikeText,
+                      ]}
+                    >
+                      {prod.nombre}
+                    </Text>
+                    <View style={styles.priceStatusLine}>
+                      <Text
+                        style={[
+                          styles.dishRowPrice,
+                          isSoldOut && { color: '#9ca3af' },
+                        ]}
+                      >
+                        ${prod.precio.toFixed(2)}
+                      </Text>
+                      {isSoldOut && <Text style={styles.soldOutTag}>Agotado</Text>}
+                    </View>
+                  </View>
+
+                  <View style={styles.qtyBox}>
+                    <TouchableOpacity
+                      style={[
+                        styles.qtyBtn,
+                        (isSoldOut || qty === 0) && styles.qtyBtnDisabled,
+                      ]}
+                      onPress={() => handleChangeQty(prod, -1)}
+                      disabled={isSoldOut || qty === 0}
+                    >
+                      <Text style={styles.qtyBtnText}>-</Text>
+                    </TouchableOpacity>
+
+                    <Text style={styles.qtyNumber}>{qty}</Text>
+
+                    <TouchableOpacity
+                      style={[styles.qtyBtn, isSoldOut && styles.qtyBtnDisabled]}
+                      onPress={() => handleChangeQty(prod, 1)}
+                      disabled={isSoldOut}
+                    >
+                      <Text style={styles.qtyBtnText}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        <View style={styles.divider} />
+
+        <View style={styles.submitRow}>
+          <View style={styles.totalLine}>
+            <Text style={styles.totalLabel}>Total: </Text>
+            <Text style={styles.totalAmount}>${orderTotal.toFixed(2)}</Text>
+          </View>
+
           <TouchableOpacity
-            key={item.id}
-            style={styles.card}
-            onPress={() => handleCycleStatus(item)}
-            activeOpacity={0.7}
+            style={[styles.registerBtn, saving && { opacity: 0.7 }]}
+            onPress={handleRegisterOrder}
+            disabled={saving}
           >
-            <View style={{ flex: 1, paddingRight: 10 }}>
-              <Text style={styles.tableText}>{item.table}</Text>
-              <Text style={styles.itemsText}>{item.items}</Text>
-              {item.total > 0 && <Text style={styles.totalText}>Total: ${item.total.toFixed(2)}</Text>}
-            </View>
-            <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) + '1A' }]}>
-              <Text style={[styles.statusText, { color: getStatusColor(item.status) }]}>{item.status}</Text>
-            </View>
+            {saving ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Text style={styles.registerBtnText}>Registrar pedido</Text>
+            )}
           </TouchableOpacity>
-        ))
-      )}
+        </View>
+      </View>
+
+      <View style={styles.filterRow}>
+        {(
+          [
+            ['today', 'Hoy'],
+            ['yesterday', 'Ayer'],
+            ['last7days', 'Últimos 7 días'],
+            ['all', 'Todas'],
+          ] as [DateFilterType, string][]
+        ).map(([key, label]) => {
+          const active = dateFilter === key;
+          return (
+            <TouchableOpacity
+              key={key}
+              style={[styles.datePill, active && styles.datePillActive]}
+              onPress={() => setDateFilter(key)}
+            >
+              <Text style={[styles.datePillText, active && styles.datePillTextActive]}>
+                {label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+
+        <TouchableOpacity
+          style={[
+            styles.datePill,
+            styles.customDatePill,
+            dateFilter === 'custom' && styles.datePillActive,
+          ]}
+          onPress={openCalendarModal}
+        >
+          <Text
+            style={[
+              styles.datePillText,
+              dateFilter === 'custom' && styles.datePillTextActive,
+            ]}
+          >
+            📅 {customDateStr}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ marginBottom: 14 }}
+        contentContainerStyle={{ gap: 8 }}
+      >
+        <TouchableOpacity
+          style={[
+            styles.statusFilterPill,
+            statusFilter === 'Todos' && styles.statusFilterPillActive,
+          ]}
+          onPress={() => setStatusFilter('Todos')}
+        >
+          <Text
+            style={[
+              styles.statusFilterText,
+              statusFilter === 'Todos' && styles.statusFilterTextActive,
+            ]}
+          >
+            Todos ({dateFilteredOrders.length})
+          </Text>
+        </TouchableOpacity>
+
+        {ORDER_STATUSES.map((st) => {
+          const active = statusFilter === st;
+          return (
+            <TouchableOpacity
+              key={st}
+              style={[styles.statusFilterPill, active && styles.statusFilterPillActive]}
+              onPress={() => setStatusFilter(st)}
+            >
+              <Text
+                style={[
+                  styles.statusFilterText,
+                  active && styles.statusFilterTextActive,
+                ]}
+              >
+                {st} ({statusCounts[st] ?? 0})
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <View style={styles.summaryCard}>
+        {loadingOrders ? (
+          <ActivityIndicator size="small" color="#5c1d24" style={{ paddingVertical: 20 }} />
+        ) : visibleOrders.length === 0 ? (
+          <View style={styles.emptyStateBox}>
+            <Text style={styles.emptyIcon}>🧾</Text>
+            <Text style={styles.emptyTitle}>No hay pedidos en este rango de fechas.</Text>
+            <Text style={styles.emptySubtitle}>
+              Prueba con otra fecha u otro estado, o registra un pedido nuevo arriba.
+            </Text>
+          </View>
+        ) : (
+          visibleOrders.map((ord) => {
+            const badge = getStatusBadgeStyle(ord.status);
+            return (
+              <View key={ord.id} style={styles.orderItemCard}>
+                <View style={styles.orderTopRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.orderClientTitle}>{ord.clientName}</Text>
+                    <Text style={styles.orderMeta}>
+                      {ord.deliveryType} · {ord.paymentMethod}
+                      {ord.clientPhone ? ` · Tel: ${ord.clientPhone}` : ''}
+                    </Text>
+                  </View>
+                  <View style={[styles.statusBadge, { backgroundColor: badge.bg }]}>
+                    <Text style={[styles.statusBadgeText, { color: badge.text }]}>
+                      {ord.status}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text style={styles.orderItemsText}>{ord.items}</Text>
+                {!!ord.notes && <Text style={styles.orderNotesText}>Nota: {ord.notes}</Text>}
+
+                <View style={styles.orderBottomRow}>
+                  <Text style={styles.orderPriceText}>Total: ${ord.total.toFixed(2)}</Text>
+                </View>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ marginTop: 10 }}
+                  contentContainerStyle={{ gap: 6 }}
+                >
+                  {ORDER_STATUSES.map((nextSt) => {
+                    const isCurrent = ord.status === nextSt;
+                    return (
+                      <TouchableOpacity
+                        key={nextSt}
+                        style={[
+                          styles.changeStatusBtn,
+                          isCurrent && styles.changeStatusBtnCurrent,
+                        ]}
+                        onPress={() => handleUpdateOrderStatus(ord.id, nextSt)}
+                      >
+                        <Text
+                          style={[
+                            styles.changeStatusText,
+                            isCurrent && styles.changeStatusTextCurrent,
+                          ]}
+                        >
+                          {nextSt}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            );
+          })
+        )}
+      </View>
+
+      <Modal
+        visible={calendarVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCalendarVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.calendarCard}>
+            <View style={styles.calendarHeader}>
+              <TouchableOpacity
+                style={styles.monthNavBtn}
+                onPress={() => handleShiftMonth(-1)}
+              >
+                <Text style={styles.monthNavText}>‹</Text>
+              </TouchableOpacity>
+
+              <Text style={styles.calendarTitle}>
+                {MONTHS_ES[calMonth]} {calYear}
+              </Text>
+
+              <TouchableOpacity
+                style={styles.monthNavBtn}
+                onPress={() => handleShiftMonth(1)}
+              >
+                <Text style={styles.monthNavText}>›</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.weekDaysRow}>
+              {['Do', 'Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sá'].map((wd) => (
+                <Text key={wd} style={styles.weekDayLabel}>
+                  {wd}
+                </Text>
+              ))}
+            </View>
+
+            <View style={styles.daysGrid}>
+              {Array.from({ length: getFirstWeekdayOfMonth(calYear, calMonth) }).map(
+                (_, idx) => (
+                  <View key={`empty-${idx}`} style={styles.dayCell} />
+                )
+              )}
+
+              {Array.from({ length: getDaysInMonth(calYear, calMonth) }).map(
+                (_, idx) => {
+                  const dayNum = idx + 1;
+                  const cellDateStr = toYMD(new Date(calYear, calMonth, dayNum));
+                  const isSelected = cellDateStr === customDateStr;
+                  const isToday = cellDateStr === toYMD(new Date());
+
+                  return (
+                    <TouchableOpacity
+                      key={dayNum}
+                      style={[
+                        styles.dayCell,
+                        isToday && styles.dayCellToday,
+                        isSelected && styles.dayCellSelected,
+                      ]}
+                      onPress={() => handleSelectCalendarDay(dayNum)}
+                    >
+                      <Text
+                        style={[
+                          styles.dayCellText,
+                          isToday && styles.dayCellTextToday,
+                          isSelected && styles.dayCellTextSelected,
+                        ]}
+                      >
+                        {dayNum}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }
+              )}
+            </View>
+
+            <View style={styles.calendarFooter}>
+              <TouchableOpacity
+                style={styles.todayQuickBtn}
+                onPress={() => {
+                  const today = new Date();
+                  setCalYear(today.getFullYear());
+                  setCalMonth(today.getMonth());
+                  setCustomDateStr(toYMD(today));
+                  setDateFilter('custom');
+                  setCalendarVisible(false);
+                }}
+              >
+                <Text style={styles.todayQuickText}>Hoy</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.closeCalendarBtn}
+                onPress={() => setCalendarVisible(false)}
+              >
+                <Text style={styles.closeCalendarText}>Cerrar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#FDFBF7' },
-  title: { fontSize: 20, fontWeight: 'bold', color: '#5c1d24', textAlign: 'center' },
-  subtitle: { fontSize: 13, color: '#666', textAlign: 'center', marginBottom: 15 },
-  backButton: { backgroundColor: '#4a154b', padding: 10, borderRadius: 8, alignItems: 'center', marginBottom: 16 },
-  backButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
-  formCard: { backgroundColor: '#fff', padding: 16, borderRadius: 10, marginBottom: 18, borderWidth: 1, borderColor: '#e0e0e0' },
-  formTitle: { fontSize: 15, fontWeight: '600', marginBottom: 10, color: '#333' },
-  input: { height: 40, borderWidth: 1, borderColor: '#ccc', borderRadius: 8, paddingHorizontal: 10, marginBottom: 12, backgroundColor: '#fafafa' },
-  labelMenu: { fontSize: 14, fontWeight: 'bold', color: '#5c1d24', marginBottom: 8 },
-  menuRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
-  menuName: { fontSize: 14, fontWeight: '500', color: '#333' },
-  menuPrice: { fontSize: 12, color: '#5c1d24', fontWeight: 'bold' },
-  counterContainer: { flexDirection: 'row', alignItems: 'center' },
-  counterBtn: { width: 28, height: 28, backgroundColor: '#5c1d24', borderRadius: 4, justifyContent: 'center', alignItems: 'center' },
-  counterBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  counterText: { marginHorizontal: 12, fontSize: 14, fontWeight: 'bold', color: '#333' },
-  addButton: { backgroundColor: '#5c1d24', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 10 },
-  addButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
-  sectionTitle: { fontSize: 15, fontWeight: 'bold', color: '#4a154b', marginBottom: 10 },
-  card: { backgroundColor: '#fff', padding: 14, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#eee', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  tableText: { fontSize: 16, fontWeight: 'bold', color: '#333', marginBottom: 2 },
-  itemsText: { fontSize: 13, color: '#666', marginBottom: 2 },
-  totalText: { fontSize: 12, fontWeight: 'bold', color: '#5c1d24' },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
-  statusText: { fontSize: 12, fontWeight: 'bold' },
+  screen: { flex: 1, backgroundColor: '#efe4d2' },
+  content: { padding: 14, paddingBottom: 34 },
+  topNav: {
+    backgroundColor: '#5c1d24',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+  },
+  topNavHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  navBrand: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  logoutBtn: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  logoutBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  navLinks: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
+  navLinkYellow: { color: '#fbbf24', fontWeight: '700', fontSize: 13 },
+  navActivePill: {
+    backgroundColor: '#b45309',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  navActiveText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 14,
+    gap: 10,
+  },
+  pageTitle: { fontSize: 22, fontWeight: '800', color: '#5c1d24' },
+  pageSubtitle: { fontSize: 13, color: '#6b5c54', marginTop: 2 },
+  refreshBtn: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#d6c7b8',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  refreshBtnText: { color: '#3f322c', fontWeight: '600', fontSize: 13 },
+
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e6d8c5',
+    marginBottom: 14,
+  },
+  sectionTitle: { fontSize: 17, fontWeight: '700', color: '#2b1b17', marginBottom: 10 },
+  fieldLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2b1b17',
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  input: {
+    height: 40,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 7,
+    paddingHorizontal: 12,
+    backgroundColor: '#fff',
+    fontSize: 13,
+    color: '#1f2937',
+  },
+
+  chipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  choiceChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 7,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  choiceChipActive: {
+    backgroundColor: '#5c1d24',
+    borderColor: '#5c1d24',
+  },
+  choiceChipText: { fontSize: 13, fontWeight: '600', color: '#374151' },
+  choiceChipTextActive: { color: '#fff' },
+
+  dishesList: { gap: 8, marginTop: 4 },
+  dishRowCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+  },
+  dishRowSoldOut: {
+    backgroundColor: '#fafafa',
+    borderColor: '#f3f4f6',
+  },
+  dishRowName: { fontSize: 14, fontWeight: '600', color: '#1f2937' },
+  soldOutStrikeText: { color: '#9ca3af', textDecorationLine: 'line-through' },
+  priceStatusLine: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  dishRowPrice: { fontSize: 13, color: '#4b5563', fontWeight: '500' },
+  soldOutTag: { fontSize: 12, fontWeight: '700', color: '#dc2626' },
+
+  qtyBox: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  qtyBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  qtyBtnDisabled: { opacity: 0.4 },
+  qtyBtnText: { fontSize: 15, fontWeight: '700', color: '#374151' },
+  qtyNumber: {
+    minWidth: 18,
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#111827',
+  },
+
+  divider: { height: 1, backgroundColor: '#ece3d5', marginVertical: 14 },
+  submitRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  totalLine: { flexDirection: 'row', alignItems: 'baseline' },
+  totalLabel: { fontSize: 16, fontWeight: '700', color: '#2b1b17' },
+  totalAmount: { fontSize: 20, fontWeight: '800', color: '#5c1d24' },
+  registerBtn: {
+    backgroundColor: '#5c1d24',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 7,
+  },
+  registerBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  datePill: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#d6c7b8',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 7,
+  },
+  datePillActive: {
+    backgroundColor: '#5c1d24',
+    borderColor: '#5c1d24',
+  },
+  datePillText: { fontSize: 13, fontWeight: '600', color: '#3f322c' },
+  datePillTextActive: { color: '#fff' },
+  customDatePill: {
+    borderColor: '#d97706',
+    justifyContent: 'center',
+  },
+
+  statusFilterPill: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#d6c7b8',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 18,
+  },
+  statusFilterPillActive: {
+    backgroundColor: '#5c1d24',
+    borderColor: '#5c1d24',
+  },
+  statusFilterText: { fontSize: 12, fontWeight: '700', color: '#4b5563' },
+  statusFilterTextActive: { color: '#fff' },
+
+  summaryCard: {
+    backgroundColor: '#faf4eb',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#d6c7b8',
+  },
+  emptyStateBox: { alignItems: 'center', paddingVertical: 22, paddingHorizontal: 10 },
+  emptyIcon: { fontSize: 26, marginBottom: 8 },
+  emptyTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#3f322c',
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 12,
+    color: '#7a6a62',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+
+  orderItemCard: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#e6d8c5',
+    marginBottom: 10,
+  },
+  orderTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  orderClientTitle: { fontSize: 15, fontWeight: '700', color: '#2b1b17' },
+  orderMeta: { fontSize: 12, color: '#6b5c54', marginTop: 2 },
+  statusBadge: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12 },
+  statusBadgeText: { fontSize: 11, fontWeight: '700' },
+  orderItemsText: { fontSize: 13, color: '#1f2937', marginTop: 8, fontWeight: '500' },
+  orderNotesText: { fontSize: 12, color: '#b45309', marginTop: 4 },
+  orderBottomRow: { marginTop: 8, flexDirection: 'row', justifyContent: 'space-between' },
+  orderPriceText: { fontSize: 14, fontWeight: '800', color: '#5c1d24' },
+
+  changeStatusBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  changeStatusBtnCurrent: {
+    backgroundColor: '#5c1d24',
+    borderColor: '#5c1d24',
+  },
+  changeStatusText: { fontSize: 11, fontWeight: '600', color: '#374151' },
+  changeStatusTextCurrent: { color: '#fff' },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 18,
+  },
+  calendarCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e6d8c5',
+  },
+  calendarHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  monthNavBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: '#f5ede0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  monthNavText: { fontSize: 20, fontWeight: '700', color: '#5c1d24' },
+  calendarTitle: { fontSize: 16, fontWeight: '800', color: '#2b1b17' },
+  weekDaysRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  weekDayLabel: {
+    width: '14.28%',
+    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6b5c54',
+  },
+  daysGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  dayCell: {
+    width: '14.28%',
+    height: 38,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 8,
+    marginVertical: 2,
+  },
+  dayCellToday: {
+    borderWidth: 1,
+    borderColor: '#b45309',
+  },
+  dayCellSelected: {
+    backgroundColor: '#5c1d24',
+  },
+  dayCellText: { fontSize: 13, fontWeight: '600', color: '#1f2937' },
+  dayCellTextToday: { color: '#b45309', fontWeight: '800' },
+  dayCellTextSelected: { color: '#fff', fontWeight: '800' },
+  calendarFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 14,
+    gap: 10,
+  },
+  todayQuickBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#fef3c7',
+  },
+  todayQuickText: { color: '#b45309', fontWeight: '700', fontSize: 13 },
+  closeCalendarBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#5c1d24',
+  },
+  closeCalendarText: { color: '#fff', fontWeight: '700', fontSize: 13 },
 });

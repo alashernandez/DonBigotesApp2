@@ -1,5 +1,11 @@
-import { initializeApp } from 'firebase/app';
-import { initializeAuth, getAuth, getReactNativePersistence } from 'firebase/auth';
+import { getApp, getApps, initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  initializeAuth,
+  type Auth,
+  type Persistence,
+} from 'firebase/auth';
+import * as firebaseAuth from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
@@ -14,15 +20,30 @@ const firebaseConfig = {
   measurementId: "G-5SDXVHV79M"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+// Evita re-inicializar la app en recargas rápidas (Fast Refresh)
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Configuración condicional: getAuth para Web, initializeAuth con AsyncStorage para Móvil
-export const auth = Platform.OS === 'web' 
-  ? getAuth(app) 
-  : initializeAuth(app, {
-      persistence: getReactNativePersistence(AsyncStorage)
-    });
+function createAuth(): Auth {
+  if (Platform.OS === 'web') {
+    return getAuth(app);
+  }
 
-// Initialize Firestore database
+  try {
+    const getRNPersistence = (
+      firebaseAuth as unknown as {
+        getReactNativePersistence?: (storage: typeof AsyncStorage) => Persistence;
+      }
+    ).getReactNativePersistence;
+
+    return initializeAuth(
+      app,
+      getRNPersistence ? { persistence: getRNPersistence(AsyncStorage) } : undefined
+    );
+  } catch {
+    // Si ya fue inicializado previamente, devuelve la instancia existente
+    return getAuth(app);
+  }
+}
+
+export const auth = createAuth();
 export const db = getFirestore(app);
