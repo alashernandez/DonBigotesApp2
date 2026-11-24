@@ -50,6 +50,8 @@ export default function OrderCard({ order }: { order: Order }) {
     if (!result.success) setError(result.error ?? "No se pudo completar la acción.");
   }
 
+  const phone = order.customerPhone || (order as any).clientPhone || "";
+
   return (
     <article
       className={`flex flex-col justify-between rounded-lg border bg-white p-5 shadow ${
@@ -62,9 +64,8 @@ export default function OrderCard({ order }: { order: Order }) {
             <p className="text-xs font-semibold uppercase tracking-wide text-cobre">
               {formatOrderNumber(order.number)} · {when}
             </p>
-            <h3 className="truncate text-lg font-semibold text-stone-900">{order.customerName}</h3>
-            {order.customerPhone && (
-              <p className="text-sm text-madera">Tel. {order.customerPhone}</p>
+                        {phone.trim() !== "" && (
+              <p className="text-sm text-madera">Tel. {phone}</p>
             )}
           </div>
           <OrderStatusBadge status={order.status} />

@@ -222,42 +222,50 @@ export default function ClientDashboardScreen({ navigation }: any) {
       collection(db, 'orders'),
       (snap) => {
         const list: ClientOrder[] = snap.docs
-          .map((d) => {
-            const raw = d.data();
-            const createdAt = raw.createdAt?.toDate
-              ? raw.createdAt.toDate()
-              : raw.createdAt
-              ? new Date(raw.createdAt)
-              : new Date();
+      .map((d) => {
+        const raw = d.data();
+        const createdAt = raw.createdAt?.toDate
+          ? raw.createdAt.toDate()
+          : raw.createdAt
+          ? new Date(raw.createdAt)
+          : new Date();
 
-            return {
-              id: d.id,
-              clientName: raw.clientName || 'Cliente',
-              clientPhone: raw.clientPhone || '',
-              notes: raw.notes || '',
-              deliveryType: raw.deliveryType || raw.table || 'Comer en el local',
-              paymentMethod: raw.paymentMethod || 'Efectivo',
-              items: raw.items || '',
-              total: Number(raw.total ?? 0),
-              status: normalizeOrderStatus(raw.status),
-              createdAtDate: createdAt,
-              _ownerUid: raw.clientUid || '',
-              _ownerEmail: raw.clientEmail || '',
-            };
-          })
-          .filter((item: any) => {
-            if (!currentUser) return true;
-            if (item._ownerUid && item._ownerUid === currentUser.uid) return true;
-            if (
-              currentUser.email &&
-              item._ownerEmail &&
-              item._ownerEmail.toLowerCase() === currentUser.email.toLowerCase()
-            ) {
-              return true;
-            }
-            return false;
-          })
-          .map(({ _ownerUid, _ownerEmail, ...rest }: any) => rest);
+        return {
+          id: d.id,
+          clientName: raw.clientName || 'Cliente',
+          clientPhone: raw.clientPhone || raw.customerPhone || '',
+          notes: raw.notes || '',
+          deliveryType: raw.deliveryType || raw.table || 'Comer en el local',
+          paymentMethod: raw.paymentMethod || 'Efectivo',
+          items: raw.items || '',
+          total: Number(raw.total ?? 0),
+          status: normalizeOrderStatus(raw.status),
+          createdAtDate: createdAt,
+          _ownerUid: raw.clientUid || raw.createdBy?.id || '',
+          _ownerEmail: raw.clientEmail || '',
+          _creatorName: raw.createdBy?.nombre || '',
+        };
+      })
+      .filter((item: any) => {
+        if (!currentUser) return true;
+        if (item._ownerUid && item._ownerUid === currentUser.uid) return true;
+        if (
+          currentUser.email &&
+          item._ownerEmail &&
+          item._ownerEmail.toLowerCase() === currentUser.email.toLowerCase()
+        ) {
+          return true;
+        }
+        if (
+          userName &&
+          item._creatorName &&
+          item._creatorName.trim().toLowerCase() === userName.trim().toLowerCase()
+        ) {
+          return true;
+        }
+        return false;
+      })
+      .map(({ _ownerUid, _ownerEmail, _creatorName, ...rest }: any) => rest);
 
         list.sort((a, b) => b.createdAtDate.getTime() - a.createdAtDate.getTime());
         setOrders(list);
