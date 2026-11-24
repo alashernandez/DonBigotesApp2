@@ -240,19 +240,19 @@ DonBigotesApp2/
 A continuación se presentan las maquetas base de **Don Bigotes**, que definieron la identidad visual, la jerarquía de información y los flujos de gestión y pedidos:
 
 ### Vista Móvil — Gestión de Menú
-![Mockup Móvil Menú](./docs/maquetas/movil-menu-admin.png)
+![Mockup Móvil Menú](./docs/mockups/movil-menu-admin.png)
 *Diseño de referencia para la visualización y administración de platillos en dispositivos móviles.*
 
 ### Vista Móvil — Pedidos y Seguimiento
-![Mockup Móvil Pedidos](./docs/maquetas/movil-menu-pedidos.png)
+![Mockup Móvil Pedidos](./docs/mockups/movil-menu-pedidos.png)
 *Diseño de referencia para la toma y seguimiento de pedidos desde la interfaz móvil.*
 
 ### Vista Web — Gestión de Menú
-![Mockup Web Menú](./docs/maquetas/web-menu-admin.png)
+![Mockup Web Menú](./docs/mockups/web-menu-admin.png)
 *Diseño de referencia para el control de platillos, precios y disponibilidad en el panel web.*
 
 ### Vista Web — Pedidos
-![Mockup Web Pedidos](./docs/maquetas/web-menu-pedidos.png)
+![Mockup Web Pedidos](./docs/mockups/web-menu-pedidos.png)
 *Diseño de referencia para el seguimiento y operación de pedidos en el panel web.*
 
 ## Licencia
