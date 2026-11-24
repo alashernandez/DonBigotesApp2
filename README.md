@@ -231,6 +231,7 @@ DonBigotesApp2/
 │   ├── App.tsx                 # Enrutador principal de pantallas
 │   └── package.json            # Dependencias de Expo / React Native
 └── README.md
+```
 
 ## Mockups de Diseño (Etapa 1 - Figma)
 
